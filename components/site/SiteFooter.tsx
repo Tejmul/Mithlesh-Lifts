@@ -15,6 +15,15 @@ export function SiteFooter() {
               <Link href="/book">Book a call</Link>
             </li>
             <li>
+              <Link href="/results">Results</Link>
+            </li>
+            <li>
+              <Link href="/about">About Mithilesh</Link>
+            </li>
+            <li>
+              <Link href="/bigg-boss">Bigg Boss</Link>
+            </li>
+            <li>
               <Link href="/privacy">Privacy</Link>
             </li>
             <li>

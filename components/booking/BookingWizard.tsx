@@ -4,14 +4,14 @@ import { parsePhoneNumberFromString } from "libphonenumber-js";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { BookingResponse, BookingSessionView, BookingView, SessionResponse, StartSessionRequest } from "@/lib/shared/api";
-import { maskPhone, trackingSchema } from "@/lib/shared/validation";
+import { createAccountSchema, maskPhone, trackingSchema } from "@/lib/shared/validation";
 import { ApiError, apiFetch } from "./api-client";
-import { canonicalZone, fmtDate, fmtTime, fmtZoneShort, minutesBetween, zoneLabel } from "./format";
-import { PhoneStep } from "./PhoneStep";
+import { canonicalZone, fmtDate, fmtTime, fmtZoneShort } from "./format";
+import { PhoneStep, type AuthMode } from "./PhoneStep";
 import { Progress } from "./Progress";
 import { SlotPicker, type Slot } from "./SlotPicker";
 
-type Step = 1 | 2 | 3;
+type Step = 1 | "name" | 2;
 type Boot = { status: "loading" } | { status: "error"; message: string } | { status: "ready" };
 
 function detectTimeZone() {
@@ -55,6 +55,8 @@ export function BookingWizard() {
   const [step, setStep] = useState<Step>(1);
   const [expired, setExpired] = useState(false);
 
+  const [mode, setMode] = useState<AuthMode>(() => (searchParams.get("login") ? "login" : "signup"));
+  const [fullName, setFullName] = useState("");
   const [country, setCountry] = useState("IN");
   const [phone, setPhone] = useState("");
   const [phoneNotice, setPhoneNotice] = useState<string | null>(null);
@@ -64,16 +66,19 @@ export function BookingWizard() {
   const [slotsReload, setSlotsReload] = useState(0);
   const [slotNotice, setSlotNotice] = useState<string | null>(null);
 
-  const [idemKey, setIdemKey] = useState("");
-
   const headingRef = useRef<HTMLHeadingElement>(null);
   const firstRender = useRef(true);
 
-  /** Apply a fresh session snapshot: confirmation, returning-visitor, or the right step. */
+  /** Apply a fresh session snapshot: confirmation, returning visitor, name, or the right step. */
   const applySession = useCallback(
     (s: BookingSessionView, opts: { initial: boolean }) => {
       if (s.bookingReference) {
         router.replace("/booking/confirmation");
+        return;
+      }
+      const next = searchParams.get("next");
+      if (s.account && next && /^\/account(\/|$)/.test(next)) {
+        router.replace(next);
         return;
       }
       setSession(s);
@@ -85,9 +90,9 @@ export function BookingWizard() {
           setPhone(parsed.formatNational());
         }
       }
-      setStep(s.phoneVerified ? 2 : 1);
+      setStep(!s.phoneVerified ? 1 : s.account ? 2 : "name");
     },
-    [router],
+    [router, searchParams],
   );
 
   useEffect(() => {
@@ -126,17 +131,9 @@ export function BookingWizard() {
     headingRef.current?.focus();
   }, [step, boot.status, session?.upcomingBooking]);
 
-  function goTo(s: Step) {
-    if (s === 3) setIdemKey(crypto.randomUUID()); // one key per review screen
-    setStep(s);
-  }
-
   async function refreshSession() {
     try {
-      const { session: s } = await apiFetch<SessionResponse>("/api/booking/start", {
-        method: "POST",
-        body: tracking,
-      });
+      const { session: s } = await apiFetch<SessionResponse>("/api/booking/start", { method: "POST", body: tracking });
       applySession(s, { initial: false });
     } catch {
       setExpired(true);
@@ -148,7 +145,7 @@ export function BookingWizard() {
       <div className="wizard-card">
         <div className="state-block" role="alert">
           <h2 className="h3">Your session timed out.</h2>
-          <p className="muted">For your security, booking sessions expire after a while. Start again. It only takes a minute.</p>
+          <p className="muted">For your security, sessions expire after a while. Start again. It only takes a minute.</p>
           <button type="button" className="btn btn-primary" onClick={() => window.location.reload()}>
             Start again
           </button>
@@ -171,7 +168,6 @@ export function BookingWizard() {
   if (boot.status === "error") {
     return (
       <div className="wizard-card">
-        <Progress step={1} />
         <div className="notice notice-error" role="alert">
           <p>{boot.message}</p>
           <button
@@ -202,10 +198,14 @@ export function BookingWizard() {
 
   return (
     <div className="wizard-card">
-      <Progress step={step} />
+      <Progress step={step === 2 ? 2 : 1} />
 
       {step === 1 && (
         <PhoneStep
+          mode={mode}
+          onModeChange={setMode}
+          fullName={fullName}
+          onFullNameChange={setFullName}
           country={country}
           phone={phone}
           onCountryChange={setCountry}
@@ -214,7 +214,7 @@ export function BookingWizard() {
           headingRef={headingRef}
           notice={phoneNotice}
           onSessionExpired={() => setExpired(true)}
-          onContinueVerified={() => goTo(2)}
+          onContinueVerified={() => setStep(session?.account ? 2 : "name")}
           onVerified={({ session: s }) => {
             setPhoneNotice(null);
             applySession(s, { initial: false });
@@ -222,69 +222,249 @@ export function BookingWizard() {
         />
       )}
 
-      {step === 2 && (
-        <section className="step" aria-labelledby="step-title">
-          <h2 id="step-title" ref={headingRef} tabIndex={-1}>
-            Book a time. Our sales team will contact you.
-          </h2>
-          <p className="step-lede">
-            A {callMinutes}-minute call to {session?.phoneE164 ? maskPhone(session.phoneE164) : "your verified number"}.
-            Times are shown in your time zone.
-          </p>
-          {slotNotice && (
-            <p className="notice notice-error" role="alert">
-              {slotNotice}
-            </p>
-          )}
-          <SlotPicker
-            timeZone={timeZone}
-            onTimeZoneChange={setTimeZone}
-            selected={slot}
-            onSelect={(s) => {
-              setSlot(s);
-              if (s) setSlotNotice(null);
-            }}
-            reloadKey={slotsReload}
-            labelledBy="step-title"
-          />
-          <div className="step-actions step-actions-split">
-            <button type="button" className="btn btn-ghost btn-lg" onClick={() => goTo(1)}>
-              Back
-            </button>
-            <button type="button" className="btn btn-primary btn-lg" disabled={!slot} onClick={() => goTo(3)}>
-              {slot ? `Continue with ${fmtTime(slot.start, timeZone)}` : "Choose a time"}
-            </button>
-          </div>
-        </section>
+      {step === "name" && (
+        <NameStep
+          headingRef={headingRef}
+          initial={fullName}
+          onDone={(s) => applySession(s, { initial: false })}
+          onSessionExpired={() => setExpired(true)}
+        />
       )}
 
-      {step === 3 && slot && session && (
-        <ReviewStep
+      {step === 2 && session && (
+        <TimeStep
           headingRef={headingRef}
-          phoneE164={session.phoneE164}
-          slot={slot}
-          timeZone={timeZone}
+          session={session}
           callMinutes={callMinutes}
-          idempotencyKey={idemKey}
-          onBack={() => goTo(2)}
-          onEditPhone={() => goTo(1)}
+          timeZone={timeZone}
+          onTimeZoneChange={setTimeZone}
+          slot={slot}
+          onSlotChange={(s) => {
+            setSlot(s);
+            if (s) setSlotNotice(null);
+          }}
+          slotsReload={slotsReload}
+          notice={slotNotice}
           onBooked={() => router.replace("/booking/confirmation")}
           onSlotGone={() => {
             setSlot(null);
-            setSlotNotice("Sorry, that time was just taken. Please pick another. The times below are up to date.");
+            setSlotNotice("That time was just taken by someone else. Please pick another. The times below are up to date.");
             setSlotsReload((k) => k + 1);
-            goTo(2);
           }}
           onAlreadyBooked={() => void refreshSession()}
           onPhoneNotVerified={() => {
             setPhoneNotice("Please verify your number again.");
-            goTo(1);
+            setStep(1);
           }}
           onSessionExpired={() => setExpired(true)}
         />
       )}
     </div>
   );
+}
+
+// ---------------------------------------------------------------- name (only when a "log in" number had no account)
+
+function NameStep({
+  headingRef,
+  initial,
+  onDone,
+  onSessionExpired,
+}: {
+  headingRef: React.RefObject<HTMLHeadingElement | null>;
+  initial: string;
+  onDone: (s: BookingSessionView) => void;
+  onSessionExpired: () => void;
+}) {
+  const [name, setName] = useState(initial);
+  const [error, setError] = useState<string | null>(null);
+  const [pending, setPending] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  async function save() {
+    const parsed = createAccountSchema.safeParse({ fullName: name });
+    if (!parsed.success) {
+      setError(parsed.error.issues[0]?.message ?? "Enter your name.");
+      inputRef.current?.focus();
+      return;
+    }
+    setPending(true);
+    setError(null);
+    try {
+      const { session } = await apiFetch<SessionResponse>("/api/booking/account", { method: "POST", body: parsed.data });
+      onDone(session);
+    } catch (err) {
+      if (err instanceof ApiError && err.code === "SESSION_EXPIRED") return onSessionExpired();
+      setError(err instanceof ApiError ? err.message : "Something went wrong. Please try again.");
+      setPending(false);
+    }
+  }
+
+  return (
+    <section className="step" aria-labelledby="step-title">
+      <h2 id="step-title" ref={headingRef} tabIndex={-1}>
+        One last thing: your name
+      </h2>
+      <p className="step-lede">Your number is verified. Tell us your name so our team knows who they&apos;re calling.</p>
+      <form
+        noValidate
+        onSubmit={(e) => {
+          e.preventDefault();
+          void save();
+        }}
+      >
+        <div className={`field${error ? " has-error" : ""}`}>
+          <label htmlFor="acct-name">Your name</label>
+          <input
+            ref={inputRef}
+            id="acct-name"
+            type="text"
+            autoComplete="name"
+            autoCapitalize="words"
+            placeholder="Rahul Sharma"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            aria-invalid={error ? true : undefined}
+            aria-describedby={error ? "acct-name-error" : undefined}
+            maxLength={80}
+          />
+          {error && (
+            <p id="acct-name-error" className="field-error" role="alert">
+              {error}
+            </p>
+          )}
+        </div>
+        <div className="step-actions">
+          <button type="submit" className="btn btn-primary btn-lg btn-block" disabled={pending} aria-busy={pending}>
+            {pending ? "Creating your account…" : "Continue"}
+          </button>
+        </div>
+      </form>
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------- time + one-tap booking
+
+function TimeStep({
+  headingRef,
+  ...p
+}: {
+  headingRef: React.RefObject<HTMLHeadingElement | null>;
+  session: BookingSessionView;
+  callMinutes: number;
+  timeZone: string;
+  onTimeZoneChange: (tz: string) => void;
+  slot: Slot | null;
+  onSlotChange: (s: Slot | null) => void;
+  slotsReload: number;
+  notice: string | null;
+  onBooked: () => void;
+  onSlotGone: () => void;
+  onAlreadyBooked: () => void;
+  onPhoneNotVerified: () => void;
+  onSessionExpired: () => void;
+}) {
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  // One idempotency key per chosen slot: double taps never create two bookings.
+  const [idem, setIdem] = useState<{ start: string; key: string } | null>(null);
+
+  async function book() {
+    if (!p.slot || pending) return;
+    const key = idem?.start === p.slot.start ? idem.key : crypto.randomUUID();
+    setIdem({ start: p.slot.start, key });
+    setPending(true);
+    setError(null);
+    try {
+      await apiFetch<BookingResponse>("/api/booking/confirm", {
+        method: "POST",
+        body: { start: p.slot.start, timeZone: p.timeZone, idempotencyKey: key },
+      });
+      p.onBooked(); // keep the button disabled while we navigate
+    } catch (err) {
+      setPending(false);
+      if (!(err instanceof ApiError)) throw err;
+      switch (err.code) {
+        case "SLOT_TAKEN":
+        case "SLOT_UNAVAILABLE":
+          return p.onSlotGone();
+        case "ALREADY_BOOKED":
+          return p.onAlreadyBooked();
+        case "PHONE_NOT_VERIFIED":
+          return p.onPhoneNotVerified();
+        case "SESSION_EXPIRED":
+          return p.onSessionExpired();
+        case "RATE_LIMITED":
+          return setError("Too many attempts. Please wait a minute and try again.");
+        case "NETWORK":
+          return setError("We couldn't connect. Check your internet connection and try again.");
+        default:
+          return setError(err.message);
+      }
+    }
+  }
+
+  const account = p.session.account;
+  const firstName = account?.fullName?.trim().split(/\s+/)[0];
+
+  return (
+    <section className="step" aria-labelledby="step-title">
+      {account && (
+        <p className="hello">
+          <span>{firstName ? `Hi ${firstName}` : "You're logged in"}</span>
+          <span className="client-id">ID {account.clientCode}</span>
+        </p>
+      )}
+      <h2 id="step-title" ref={headingRef} tabIndex={-1}>
+        Book a time. Our sales team will contact you.
+      </h2>
+      <p className="step-lede">
+        A {p.callMinutes}-minute call to {p.session.phoneE164 ? maskPhone(p.session.phoneE164) : "your verified number"}.
+      </p>
+      {p.notice && (
+        <p className="notice notice-error" role="alert">
+          {p.notice}
+        </p>
+      )}
+      <SlotPicker
+        timeZone={p.timeZone}
+        onTimeZoneChange={p.onTimeZoneChange}
+        selected={p.slot}
+        onSelect={p.onSlotChange}
+        reloadKey={p.slotsReload}
+        labelledBy="step-title"
+      />
+      {error && (
+        <p className="notice notice-error" role="alert">
+          {error}
+        </p>
+      )}
+      <div className={`book-bar${p.slot ? " is-ready" : ""}`}>
+        <p className="sr-only" role="status" aria-live="polite">
+          {pending ? "Booking your call…" : p.slot ? `Selected ${fmtDate(p.slot.start, p.timeZone)} at ${fmtTime(p.slot.start, p.timeZone)}` : ""}
+        </p>
+        <button
+          type="button"
+          className="btn btn-primary btn-lg btn-block"
+          disabled={!p.slot || pending}
+          aria-busy={pending}
+          onClick={() => void book()}
+        >
+          {pending
+            ? "Booking…"
+            : p.slot
+              ? `Book ${fmtDayShort(p.slot.start, p.timeZone)} · ${fmtTime(p.slot.start, p.timeZone)}`
+              : "Pick a day and time above"}
+        </button>
+        <p className="book-bar-note">You can reschedule or cancel anytime before the call.</p>
+      </div>
+    </section>
+  );
+}
+
+function fmtDayShort(iso: string, tz: string) {
+  return new Intl.DateTimeFormat("en-IN", { timeZone: tz, weekday: "short", day: "numeric", month: "short" }).format(new Date(iso));
 }
 
 function WizardSkeleton() {
@@ -333,124 +513,6 @@ function UpcomingBooking({
       ) : (
         <p className="notice">It&apos;s too close to the call to change it online. If something comes up, DM us on Instagram.</p>
       )}
-    </section>
-  );
-}
-
-// ---------------------------------------------------------------- step 3
-
-function ReviewStep({ headingRef, ...p }: {
-  headingRef: React.RefObject<HTMLHeadingElement | null>;
-  phoneE164: string | null;
-  slot: Slot;
-  timeZone: string;
-  callMinutes: number;
-  idempotencyKey: string;
-  onBack: () => void;
-  onEditPhone: () => void;
-  onBooked: () => void;
-  onSlotGone: () => void;
-  onAlreadyBooked: () => void;
-  onPhoneNotVerified: () => void;
-  onSessionExpired: () => void;
-}) {
-  const [pending, setPending] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const minutes = minutesBetween(p.slot.start, p.slot.end) || p.callMinutes;
-
-  async function confirm() {
-    if (pending) return;
-    setPending(true);
-    setError(null);
-    try {
-      await apiFetch<BookingResponse>("/api/booking/confirm", {
-        method: "POST",
-        body: { start: p.slot.start, timeZone: p.timeZone, idempotencyKey: p.idempotencyKey },
-      });
-      p.onBooked(); // keep the button disabled while we navigate
-    } catch (err) {
-      if (!(err instanceof ApiError)) {
-        setPending(false);
-        throw err;
-      }
-      switch (err.code) {
-        case "SLOT_TAKEN":
-        case "SLOT_UNAVAILABLE":
-          return p.onSlotGone();
-        case "ALREADY_BOOKED":
-          return p.onAlreadyBooked();
-        case "PHONE_NOT_VERIFIED":
-          return p.onPhoneNotVerified();
-        case "SESSION_EXPIRED":
-          return p.onSessionExpired();
-        case "RATE_LIMITED":
-          setError("Too many attempts. Please wait a minute and try again.");
-          break;
-        case "NETWORK":
-          setError("We couldn't connect. Check your internet connection and try again.");
-          break;
-        default:
-          setError(err.message);
-      }
-      setPending(false);
-    }
-  }
-
-  const rows: { label: string; value: string; edit?: () => void; editLabel?: string }[] = [
-    {
-      label: "Phone",
-      value: p.phoneE164 ? `${maskPhone(p.phoneE164)} · verified` : "Verified",
-      edit: p.onEditPhone,
-      editLabel: "phone number",
-    },
-    { label: "Date", value: fmtDate(p.slot.start, p.timeZone), edit: p.onBack, editLabel: "date" },
-    {
-      label: "Time",
-      value: `${fmtTime(p.slot.start, p.timeZone)} ${fmtZoneShort(p.slot.start, p.timeZone)} (${zoneLabel(p.timeZone, p.slot.start)})`,
-      edit: p.onBack,
-      editLabel: "time",
-    },
-    { label: "Call length", value: `${minutes} minutes` },
-  ];
-
-  return (
-    <section className="step" aria-labelledby="step-title">
-      <h2 id="step-title" ref={headingRef} tabIndex={-1}>
-        Confirm your call
-      </h2>
-      <p className="step-lede">Our sales team will call you on your verified number at this time.</p>
-      <dl className="review-list">
-        {rows.map((r) => (
-          <div key={r.label}>
-            <dt>{r.label}</dt>
-            <dd>
-              <span>{r.value}</span>
-              {r.edit && (
-                <button type="button" className="link-btn" onClick={r.edit} disabled={pending}>
-                  Change<span className="sr-only"> {r.editLabel}</span>
-                </button>
-              )}
-            </dd>
-          </div>
-        ))}
-      </dl>
-      <p className="field-hint">You can reschedule or cancel anytime before the call.</p>
-      {error && (
-        <p className="notice notice-error" role="alert">
-          {error}
-        </p>
-      )}
-      <p className="sr-only" role="status" aria-live="polite">
-        {pending ? "Booking your call…" : ""}
-      </p>
-      <div className="step-actions step-actions-split">
-        <button type="button" className="btn btn-ghost btn-lg" onClick={p.onBack} disabled={pending}>
-          Back
-        </button>
-        <button type="button" className="btn btn-primary btn-lg" onClick={() => void confirm()} disabled={pending} aria-busy={pending}>
-          {pending ? "Booking…" : "Book my call"}
-        </button>
-      </div>
     </section>
   );
 }

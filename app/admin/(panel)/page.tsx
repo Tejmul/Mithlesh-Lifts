@@ -6,6 +6,7 @@ import { fmtDateTime, fmtInr, pct } from "@/lib/server/admin/format";
 import { FUNNEL_PERIODS, getFunnel, parsePeriod } from "@/lib/server/admin/funnel";
 import { db } from "@/lib/server/db";
 import { getSettings } from "@/lib/server/settings";
+import { ClientCode } from "../_components/ClientCode";
 
 export const metadata: Metadata = { title: "Dashboard" };
 
@@ -100,6 +101,8 @@ export default async function DashboardPage({ searchParams }: PageProps<"/admin"
         </div>
         <p className="adm-muted adm-small">
           {fmtDateTime(funnel.from, tz)} – now. Booked, completed and clients count bookings made in this period.
+          Quotes paid and revenue collected count payments received in this period; recorded deals are values entered
+          under Sales outcome.
         </p>
         <ol className="adm-funnel">
           {steps.map((s) => (
@@ -112,11 +115,26 @@ export default async function DashboardPage({ searchParams }: PageProps<"/admin"
         </ol>
         <ul className="adm-kpis">
           <li>
-            <span className="adm-kpi-label">Revenue</span>
+            <span className="adm-kpi-label">Quotes sent</span>
+            <span className="adm-kpi-value">{funnel.quotesSent}</span>
+          </li>
+          <li>
+            <span className="adm-kpi-label">Quotes paid</span>
+            <span className="adm-kpi-value">
+              {funnel.quotesPaid}{" "}
+              <span className="adm-small adm-muted">({pct(funnel.quotesPaid, funnel.quotesSent)})</span>
+            </span>
+          </li>
+          <li>
+            <span className="adm-kpi-label">Revenue collected (paid quotes)</span>
+            <span className="adm-kpi-value adm-quote-status-paid">{fmtInr(funnel.quoteRevenue)}</span>
+          </li>
+          <li>
+            <span className="adm-kpi-label">Recorded deals</span>
             <span className="adm-kpi-value">{fmtInr(funnel.revenue)}</span>
           </li>
           <li>
-            <span className="adm-kpi-label">Average deal</span>
+            <span className="adm-kpi-label">Average recorded deal</span>
             <span className="adm-kpi-value">
               {funnel.clients ? fmtInr(Math.round(funnel.revenue / funnel.clients)) : "—"}
             </span>
@@ -145,7 +163,7 @@ export default async function DashboardPage({ searchParams }: PageProps<"/admin"
                   <th scope="col">Completed</th>
                   <th scope="col">Clients</th>
                   <th scope="col">Booked → client</th>
-                  <th scope="col">Revenue</th>
+                  <th scope="col">Recorded deals</th>
                 </tr>
               </thead>
               <tbody>
@@ -193,6 +211,7 @@ export default async function DashboardPage({ searchParams }: PageProps<"/admin"
                   <tr>
                     <th scope="col">When</th>
                     <th scope="col">Phone</th>
+                    <th scope="col">Client ID</th>
                     <th scope="col">Name</th>
                   </tr>
                 </thead>
@@ -204,6 +223,9 @@ export default async function DashboardPage({ searchParams }: PageProps<"/admin"
                         <Link href={`/admin/bookings/${b.id}`} className="adm-phone">
                           {b.lead.phoneE164}
                         </Link>
+                      </td>
+                      <td className="adm-nowrap">
+                        <ClientCode code={b.lead.clientCode} />
                       </td>
                       <td>{b.lead.fullName ?? <span className="adm-muted">—</span>}</td>
                     </tr>
@@ -226,6 +248,7 @@ export default async function DashboardPage({ searchParams }: PageProps<"/admin"
                 <thead>
                   <tr>
                     <th scope="col">Phone</th>
+                    <th scope="col">Client ID</th>
                     <th scope="col">Name</th>
                     <th scope="col">Source</th>
                     <th scope="col">Created</th>
@@ -235,9 +258,12 @@ export default async function DashboardPage({ searchParams }: PageProps<"/admin"
                   {newestLeads.map((l) => (
                     <tr key={l.id}>
                       <td className="adm-nowrap">
-                        <Link href={`/admin/bookings?q=${encodeURIComponent(l.phoneE164)}`} className="adm-phone">
+                        <Link href={`/admin/leads/${l.id}`} className="adm-phone">
                           {l.phoneE164}
                         </Link>
+                      </td>
+                      <td className="adm-nowrap">
+                        <ClientCode code={l.clientCode} />
                       </td>
                       <td>{l.fullName ?? <span className="adm-muted">—</span>}</td>
                       <td>{[l.source, l.campaign].filter(Boolean).join(" / ") || "—"}</td>

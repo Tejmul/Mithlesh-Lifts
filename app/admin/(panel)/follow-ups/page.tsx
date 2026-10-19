@@ -5,6 +5,7 @@ import { fmtDateTime } from "@/lib/server/admin/format";
 import { getRebookCandidates, getVerifiedUnbooked } from "@/lib/server/admin/follow-ups";
 import { getSettings } from "@/lib/server/settings";
 import { env } from "@/lib/server/env";
+import { ClientCode } from "../../_components/ClientCode";
 import { StatusBadge } from "../../_components/StatusBadge";
 
 export const metadata: Metadata = { title: "Follow-ups" };
@@ -73,10 +74,20 @@ export default async function FollowUpsPage({ searchParams }: PageProps<"/admin/
                   <p className="adm-card-title">
                     <a href={`tel:${u.phoneE164}`} className="adm-phone">
                       {u.phoneE164}
-                    </a>
+                    </a>{" "}
+                    <ClientCode code={u.clientCode} />
                   </p>
                   {(u.fullName || u.email) && (
-                    <p className="adm-small">{[u.fullName, u.email].filter(Boolean).join(" · ")}</p>
+                    <p className="adm-small">
+                      {u.leadId ? <Link href={`/admin/leads/${u.leadId}`}>{u.fullName ?? "Open lead"}</Link> : u.fullName}
+                      {u.fullName && u.email ? " · " : ""}
+                      {u.email}
+                    </p>
+                  )}
+                  {u.leadId && !u.fullName && !u.email && (
+                    <p className="adm-small">
+                      <Link href={`/admin/leads/${u.leadId}`}>Open lead</Link>
+                    </p>
                   )}
                   <p className="adm-small adm-muted">
                     Verified {fmtDateTime(u.verifiedAt, tz)}
@@ -111,7 +122,7 @@ export default async function FollowUpsPage({ searchParams }: PageProps<"/admin/
                     <a href={`tel:${r.lead.phoneE164}`} className="adm-phone">
                       {r.lead.phoneE164}
                     </a>{" "}
-                    <StatusBadge status={r.status} />
+                    <ClientCode code={r.lead.clientCode} /> <StatusBadge status={r.status} />
                   </p>
                   <p className="adm-small">
                     <Link href={`/admin/bookings/${r.bookingId}`}>{r.lead.fullName ?? "No name yet"}</Link>

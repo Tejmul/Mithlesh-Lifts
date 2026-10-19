@@ -7,7 +7,13 @@ import { maskPhone, sendCodeSchema, verifyCodeSchema } from "@/lib/shared/valida
 import { ApiError, apiFetch } from "./api-client";
 import { countryOptions } from "./countries";
 
+export type AuthMode = "signup" | "login";
+
 type Props = {
+  mode: AuthMode;
+  onModeChange: (m: AuthMode) => void;
+  fullName: string;
+  onFullNameChange: (n: string) => void;
   country: string;
   phone: string;
   onCountryChange: (c: string) => void;
@@ -39,6 +45,8 @@ export function PhoneStep({ headingRef, ...p }: Props) {
   const [status, setStatus] = useState("");
 
   const phoneRef = useRef<HTMLInputElement>(null);
+  const nameRef = useRef<HTMLInputElement>(null);
+  const [nameError, setNameError] = useState<string | null>(null);
   const codeRef = useRef<HTMLInputElement>(null);
 
   // Resend countdown
@@ -62,19 +70,33 @@ export function PhoneStep({ headingRef, ...p }: Props) {
   async function send() {
     setFormError(null);
     setCodeError(null);
-    const parsed = sendCodeSchema.safeParse({ country: p.country, phone: p.phone });
+    const parsed = sendCodeSchema.safeParse({
+      country: p.country,
+      phone: p.phone,
+      fullName: p.mode === "signup" ? p.fullName : undefined,
+      mode: p.mode,
+    });
     if (!parsed.success) {
-      setPhoneError(parsed.error.issues[0]?.message ?? "Enter a valid mobile number.");
-      phoneRef.current?.focus();
+      const byField = Object.fromEntries(parsed.error.issues.map((i) => [String(i.path[0]), i.message]));
+      setNameError(byField.fullName ?? null);
+      setPhoneError(byField.phone ?? null);
+      if (byField.fullName) nameRef.current?.focus();
+      else phoneRef.current?.focus();
       return;
     }
+    setNameError(null);
     setPhoneError(null);
     setSending(true);
     setStatus("Sending your code…");
     try {
       const res = await apiFetch<SendCodeResponse>("/api/booking/phone/send", {
         method: "POST",
-        body: { country: parsed.data.country, phone: parsed.data.phone },
+        body: {
+          country: parsed.data.country,
+          phone: parsed.data.phone,
+          mode: parsed.data.mode,
+          ...(parsed.data.fullName ? { fullName: parsed.data.fullName } : {}),
+        },
       });
       const n = nowMs();
       setNow(n);
@@ -147,12 +169,14 @@ export function PhoneStep({ headingRef, ...p }: Props) {
   return (
     <section className="step" aria-labelledby="step-title">
       <h2 id="step-title" ref={headingRef} tabIndex={-1}>
-        {phase === "code" ? "Enter your code" : "Your mobile number"}
+        {phase === "code" ? "Enter the code we sent" : p.mode === "signup" ? "Create your account" : "Welcome back"}
       </h2>
       <p className="step-lede">
         {phase === "code"
-          ? `We sent a code by SMS to ${sent ? maskPhone(sent.sentTo) : "your number"}.`
-          : "We'll text you a one-time code to confirm it's you."}
+          ? `We sent a 6-digit code by SMS to ${sent ? maskPhone(sent.sentTo) : "your number"}.`
+          : p.mode === "signup"
+            ? "Your name and number. We'll text you a code to confirm it's you."
+            : "Enter your number and we'll text you a code to log in."}
       </p>
 
       {p.notice && (
@@ -187,6 +211,29 @@ export function PhoneStep({ headingRef, ...p }: Props) {
             void send();
           }}
         >
+          {p.mode === "signup" && (
+            <div className={`field${nameError ? " has-error" : ""}`}>
+              <label htmlFor="fullName">Your name</label>
+              <input
+                ref={nameRef}
+                id="fullName"
+                type="text"
+                autoComplete="name"
+                autoCapitalize="words"
+                placeholder="Rahul Sharma"
+                value={p.fullName}
+                onChange={(e) => p.onFullNameChange(e.target.value)}
+                aria-invalid={nameError ? true : undefined}
+                aria-describedby={nameError ? "name-error" : undefined}
+                maxLength={80}
+              />
+              {nameError && (
+                <p id="name-error" className="field-error">
+                  {nameError}
+                </p>
+              )}
+            </div>
+          )}
           <div className="phone-row">
             <div className="field field-country">
               <label htmlFor="country">Country code</label>
@@ -232,7 +279,7 @@ export function PhoneStep({ headingRef, ...p }: Props) {
           )}
           <div className="step-actions">
             <button type="submit" className="btn btn-primary btn-lg btn-block" disabled={sending} aria-busy={sending}>
-              {sending ? "Sending code…" : "Send code"}
+              {sending ? "Sending code…" : "Get OTP"}
             </button>
             {p.verifiedPhone && (
               <button type="button" className="btn btn-ghost btn-lg" onClick={() => setChanging(false)}>
@@ -240,6 +287,19 @@ export function PhoneStep({ headingRef, ...p }: Props) {
               </button>
             )}
           </div>
+          <p className="auth-switch">
+            {p.mode === "signup" ? "Already have an account?" : "New here?"}{" "}
+            <button
+              type="button"
+              className="link-btn"
+              onClick={() => {
+                setNameError(null);
+                p.onModeChange(p.mode === "signup" ? "login" : "signup");
+              }}
+            >
+              {p.mode === "signup" ? "Log in" : "Create an account"}
+            </button>
+          </p>
         </form>
       ) : (
         <form
@@ -285,7 +345,7 @@ export function PhoneStep({ headingRef, ...p }: Props) {
           </div>
           <div className="step-actions">
             <button type="submit" className="btn btn-primary btn-lg btn-block" disabled={verifying} aria-busy={verifying}>
-              {verifying ? "Verifying…" : "Verify"}
+              {verifying ? "Verifying…" : "Verify & continue"}
             </button>
           </div>
           <div className="otp-links">

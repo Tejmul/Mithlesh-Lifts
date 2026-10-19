@@ -9,6 +9,8 @@ import { reportError } from "@/lib/server/observability";
 import { getAvailableSlots, type Slot } from "@/lib/server/scheduling/availability";
 import { getSettings } from "@/lib/server/settings";
 import { ActionForm } from "../../../_components/ActionForm";
+import { ClientCode } from "../../../_components/ClientCode";
+import { QuotePanel } from "../../../_components/QuotePanel";
 import { StatusBadge } from "../../../_components/StatusBadge";
 import {
   cancelAction,
@@ -77,6 +79,7 @@ export default async function BookingDetailPage({ params }: PageProps<"/admin/bo
           <a href={`tel:${lead.phoneE164}`} className="adm-phone-lg">
             {lead.phoneE164}
           </a>{" "}
+          <ClientCode code={lead.clientCode} large />{" "}
           <span className="adm-muted adm-h1-sub">
             {lead.fullName ?? "No name yet"} · <span className="adm-mono">{booking.reference}</span>
           </span>
@@ -136,6 +139,10 @@ export default async function BookingDetailPage({ params }: PageProps<"/admin/bo
                 WhatsApp
               </a>
             </dd>
+            <dt>Client ID</dt>
+            <dd>
+              {lead.clientCode ? <ClientCode code={lead.clientCode} /> : <span className="adm-muted">No account yet</span>}
+            </dd>
             <dt>Name</dt>
             <dd>{lead.fullName ?? <span className="adm-muted">No name yet</span>}</dd>
             <dt>Phone verified</dt>
@@ -164,6 +171,12 @@ export default async function BookingDetailPage({ params }: PageProps<"/admin/bo
         </section>
       </div>
 
+      <QuotePanel
+        lead={lead}
+        booking={{ id: booking.id, convertedAt: booking.convertedAt, status: booking.status }}
+        tz={tz}
+      />
+
       {booking.status !== "CANCELLED" && (
         <section className="adm-panel adm-outcome" aria-labelledby="outcome-h">
           <h2 id="outcome-h" className="adm-h2">
@@ -182,6 +195,9 @@ export default async function BookingDetailPage({ params }: PageProps<"/admin/bo
             ) : (
               <span className="adm-muted">Not recorded yet — update after the call.</span>
             )}
+          </p>
+          <p className="adm-muted adm-small">
+            A paid quote is the client conversion — once it&apos;s paid, mark as client here with the paid amount.
           </p>
           <div className="adm-actions-grid">
             <ActionForm

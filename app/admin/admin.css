@@ -805,3 +805,92 @@ body:has(.adm) {
   display: block;
   margin-top: 2px;
 }
+
+/* Client ID (Lead.clientCode) — quoted on sales calls, shown next to the phone. */
+.adm-client-code {
+  display: inline-block;
+  padding: 0 6px;
+  border: 1px solid color-mix(in srgb, var(--a-gold) 55%, transparent);
+  border-radius: 4px;
+  color: var(--a-gold);
+  font: 600 0.8125rem/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+.adm-client-code-lg {
+  font-size: 1rem;
+  padding: 1px 8px;
+}
+
+/* ---------- quotes ---------- */
+.adm-badge-paid {
+  color: #0d2416;
+  background: var(--a-green);
+  border-color: var(--a-green);
+}
+.adm-quote-status-paid,
+.adm a.adm-quote-status-paid {
+  color: var(--a-green);
+  font-weight: 600;
+}
+.adm-quote-status-sent,
+.adm a.adm-quote-status-sent {
+  color: var(--a-blue);
+}
+.adm-quotes {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+.adm-quote {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+  padding: 10px 12px;
+  border: 1px solid var(--a-border);
+  border-radius: var(--a-radius);
+  background: var(--a-panel-2);
+}
+.adm-quote-paid {
+  border-color: var(--a-green);
+  background: color-mix(in srgb, var(--a-green) 10%, var(--a-panel-2));
+}
+.adm-quote-cancelled {
+  opacity: 0.7;
+}
+.adm-quote-main {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.adm-quote-amount {
+  font: 700 1.125rem/1.2 var(--a-head);
+  font-variant-numeric: tabular-nums;
+}
+.adm-callout {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border-left: 3px solid var(--a-green);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--a-green) 8%, transparent);
+  font-size: 0.875rem;
+}
+.adm-quote-form {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), 1fr));
+  align-items: end;
+}
+.adm-quote-form .adm-field-wide {
+  grid-column: 1 / -1;
+}
+.adm-quote-form .adm-field-errors,
+.adm-quote-form .adm-form-actions {
+  grid-column: 1 / -1;
+}
+.adm-quote-main p {
+  margin: 0;
+}

@@ -11,6 +11,7 @@ import {
 import { fmtDateTime, fmtInr, STATUS_LABEL, whatsappUrl } from "@/lib/server/admin/format";
 import { db } from "@/lib/server/db";
 import { getSettings } from "@/lib/server/settings";
+import { ClientCode } from "../../_components/ClientCode";
 import { StatusBadge } from "../../_components/StatusBadge";
 
 export const metadata: Metadata = { title: "Bookings" };
@@ -47,7 +48,7 @@ export default async function BookingsPage({ searchParams }: PageProps<"/admin/b
       <form className="adm-filters" method="get" role="search" aria-label="Filter bookings">
         <label className="adm-field adm-field-grow">
           <span>Search</span>
-          <input name="q" type="search" defaultValue={filters.q} placeholder="Name, phone, email or reference" />
+          <input name="q" type="search" defaultValue={filters.q} placeholder="Name, phone, client ID, email or reference" />
         </label>
         <label className="adm-field">
           <span>Status</span>
@@ -119,7 +120,8 @@ export default async function BookingsPage({ searchParams }: PageProps<"/admin/b
                   </Link>{" "}
                   <a href={whatsappUrl(b.lead.phoneE164)} target="_blank" rel="noopener noreferrer" className="adm-small">
                     WA
-                  </a>
+                  </a>{" "}
+                  <ClientCode code={b.lead.clientCode} />
                 </td>
                 <td className="adm-nowrap">
                   <Link href={`/admin/bookings/${b.id}`}>{fmtDateTime(b.startsAt, tz)}</Link>

@@ -40,7 +40,11 @@ export type BookingSessionView = {
   bookingReference: string | null;
   /** After verification: this number's next confirmed call (returning visitor → offer reschedule/cancel). */
   upcomingBooking: BookingView | null;
+  /** Set once the visitor is logged in (phone verified → account exists). */
+  account: AccountSummary | null;
 };
+
+export type AccountSummary = { clientCode: string; fullName: string | null; phoneE164: string };
 export type SessionResponse = { session: BookingSessionView };
 
 /**
@@ -49,12 +53,25 @@ export type SessionResponse = { session: BookingSessionView };
  */
 export type StartSessionRequest = { source?: string; campaign?: string; mc?: string };
 
-/** POST /api/booking/phone/send — step 1. 429 RATE_LIMITED / OTP_COOLDOWN, 502 OTP_SEND_FAILED. */
-export type SendCodeRequest = { country: string; phone: string };
+/**
+ * POST /api/booking/phone/send — step 1. 429 RATE_LIMITED / OTP_COOLDOWN, 502 OTP_SEND_FAILED.
+ * mode "signup" (name + phone) or "login" (phone only). The server never reveals whether an
+ * account exists before the OTP is verified.
+ */
+export type SendCodeRequest = { country: string; phone: string; fullName?: string; mode?: "signup" | "login" };
 export type SendCodeResponse = { sentTo: string; resendAvailableAt: string };
 
-/** POST /api/booking/phone/verify → SessionResponse. 400 OTP_INVALID. */
+/**
+ * POST /api/booking/phone/verify → SessionResponse. 400 OTP_INVALID.
+ * On success the phone is verified. If an account exists (or a name was given at signup) the
+ * account is created/loaded, session.account is set and the customer cookie is issued.
+ * If this number has no account and no name is known, session.phoneVerified = true but
+ * session.account = null → the UI asks for the name and calls POST /api/booking/account.
+ */
 export type VerifyCodeRequest = { code: string };
+
+/** POST /api/booking/account { fullName } — finish creating the account after verification → SessionResponse. 403 PHONE_NOT_VERIFIED. */
+export type CreateAccountRequest = { fullName: string };
 
 /** PUT /api/booking/contact — optional (not used by the current flow) → SessionResponse. */
 export type SaveContactRequest = { fullName: string; email: string; marketingConsent?: boolean };
@@ -96,3 +113,64 @@ export type BookingResponse = { booking: BookingView };
 export type CancelBookingRequest = { token: string; reason?: string };
 /** POST /api/booking/manage/reschedule → BookingResponse (fresh manageUrl; old link stops working) */
 export type RescheduleBookingRequest = { token: string; start: string; timeZone: string };
+
+// ---------------------------------------------------------------- customer account (cookie: css_customer)
+
+/** GET /api/account → 401 UNAUTHORIZED when logged out. */
+export type AccountResponse = {
+  account: AccountSummary;
+  upcomingBooking: BookingView | null;
+  unreadCount: number;
+};
+
+export type InboxItemView = {
+  id: string;
+  kind: "booking_confirmed" | "booking_rescheduled" | "booking_cancelled" | "quote_sent" | "payment_received";
+  title: string;
+  body: string;
+  createdAt: string;
+  read: boolean;
+  /** Where tapping the notification goes, e.g. "/account/quotes/<id>" or the booking manage URL. */
+  href: string | null;
+};
+/** GET /api/account/inbox */
+export type InboxResponse = { items: InboxItemView[]; unreadCount: number };
+/** POST /api/account/inbox/read { ids?: string[] } — omit ids to mark all read → InboxResponse */
+export type MarkReadRequest = { ids?: string[] };
+
+export type QuoteView = {
+  id: string;
+  reference: string;
+  planName: string;
+  amountInr: number;
+  note: string | null;
+  status: "SENT" | "PAID" | "CANCELLED";
+  createdAt: string;
+  paidAt: string | null;
+  /** False until a payment provider is configured — UI shows "Payment opens soon". */
+  canPay: boolean;
+};
+/** GET /api/account/quotes → { quotes } ; GET /api/account/quotes/[id] → { quote } (404 if not the customer's) */
+export type QuotesResponse = { quotes: QuoteView[] };
+export type QuoteResponse = { quote: QuoteView };
+
+/** POST /api/account/quotes/[id]/checkout → opens Razorpay Checkout on the client. 409 if already paid. */
+export type CheckoutResponse = {
+  provider: "razorpay";
+  keyId: string;
+  orderId: string;
+  amountPaise: number;
+  currency: "INR";
+  name: string; // brand shown in the checkout
+  description: string; // plan name
+  prefill: { name?: string; contact?: string };
+};
+/** POST /api/payments/razorpay/verify → QuoteResponse (status PAID) */
+export type VerifyPaymentRequest = {
+  quoteId: string;
+  razorpay_order_id: string;
+  razorpay_payment_id: string;
+  razorpay_signature: string;
+};
+
+/** POST /api/account/logout → 204 */

@@ -117,6 +117,7 @@ describe("session lifecycle", () => {
       coachTimeZone: "Asia/Kolkata",
       bookingReference: null,
       upcomingBooking: null,
+      account: null,
     });
 
     const lead = await db.lead.create({

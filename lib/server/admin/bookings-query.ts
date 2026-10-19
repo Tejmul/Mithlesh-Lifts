@@ -83,6 +83,7 @@ export function bookingWhere(f: BookingFilters, coachTimeZone: string): Prisma.B
       { reference: { contains: f.q, mode: "insensitive" } },
       { lead: { fullName: { contains: f.q, mode: "insensitive" } } },
       { lead: { email: { contains: f.q, mode: "insensitive" } } },
+      { lead: { clientCode: { contains: f.q, mode: "insensitive" } } },
     ];
     const digits = f.q.replace(/[^\d]/g, "");
     if (digits.length >= 3) or.push({ lead: { phoneE164: { contains: digits } } });

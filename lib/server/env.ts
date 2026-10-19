@@ -32,6 +32,10 @@ const schema = z.object({
   /** Bearer secret for /api/cron/* (Vercel Cron sends Authorization: Bearer <CRON_SECRET>). */
   CRON_SECRET: z.string().min(16).optional(),
 
+  RAZORPAY_KEY_ID: z.string().optional(),
+  RAZORPAY_KEY_SECRET: z.string().optional(),
+  RAZORPAY_WEBHOOK_SECRET: z.string().optional(),
+
   /** Hook for an error tracker (Sentry etc.). */
   SENTRY_DSN: z.string().optional(),
 });

@@ -33,7 +33,14 @@ export type Funnel = {
   completed: number;
   noShows: number;
   clients: number;
+  /** Manually recorded deal values (Sales outcome → Mark as client). */
   revenue: number;
+  /** Quotes created in the period (any status). */
+  quotesSent: number;
+  /** Quotes paid online in the period (by paidAt). */
+  quotesPaid: number;
+  /** Sum of paid quote amounts in the period, whole rupees. */
+  quoteRevenue: number;
   rows: AttributionRow[];
 };
 
@@ -50,7 +57,7 @@ export async function getFunnel(period: FunnelPeriod, coachTimeZone: string, now
     .toJSDate();
   const range = { gte: from, lte: now };
 
-  const [verifiedGroups, bookingGroups] = await Promise.all([
+  const [verifiedGroups, bookingGroups, quotesSent, paidQuotes] = await Promise.all([
     db.bookingSession.groupBy({
       by: ["source", "campaign", "phoneE164"],
       where: { phoneVerifiedAt: range, phoneE164: { not: null } },
@@ -60,6 +67,12 @@ export async function getFunnel(period: FunnelPeriod, coachTimeZone: string, now
       where: { createdAt: range },
       _count: { _all: true },
       _sum: { dealValueInr: true },
+    }),
+    db.quote.count({ where: { createdAt: range } }),
+    db.quote.aggregate({
+      where: { status: "PAID", paidAt: range },
+      _count: { _all: true },
+      _sum: { amountInr: true },
     }),
   ]);
   const convertedGroups = await db.booking.groupBy({
@@ -120,6 +133,9 @@ export async function getFunnel(period: FunnelPeriod, coachTimeZone: string, now
     noShows,
     clients: sum("clients"),
     revenue: sum("revenue"),
+    quotesSent,
+    quotesPaid: paidQuotes._count._all,
+    quoteRevenue: paidQuotes._sum.amountInr ?? 0,
     rows: list,
   };
 }

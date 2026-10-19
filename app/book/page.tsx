@@ -30,7 +30,7 @@ export default function BookPage() {
       <div className="page book-page">
         <div className="book-main">
           <header className="book-intro">
-            <p className="eyebrow">mithilesh_lifts · Coach Scale Systems</p>
+            <p className="eyebrow">30-minute call with our team</p>
             <h1>Let&apos;s build your fitness plan.</h1>
             <p className="muted">A short call to understand your goals and work out the right approach.</p>
           </header>

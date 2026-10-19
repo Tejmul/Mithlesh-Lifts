@@ -44,11 +44,8 @@ export const STATUS_LABEL: Record<string, string> = {
   NO_SHOW: "No-show",
 };
 
-const inr = new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 0 });
 /** ₹1,25,000 */
-export function fmtInr(rupees: number) {
-  return inr.format(rupees);
-}
+export { formatInr as fmtInr } from "./quote-summary";
 
 /** Percentage string, or "—" when the denominator is 0. */
 export function pct(numerator: number, denominator: number) {

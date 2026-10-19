@@ -2,9 +2,10 @@ import "server-only";
 // OWNER: Agent A. Server-side state for one visitor on /book.
 // The httpOnly cookie holds only a random token; the DB stores hashToken(token).
 import { cookies } from "next/headers";
-import type { BookingSession } from "@/generated/prisma/client";
+import type { BookingSession, Lead } from "@/generated/prisma/client";
 import type { BookingSessionView } from "@/lib/shared/api";
 import { hashToken, randomToken } from "./crypto";
+import { getCurrentCustomer, toAccountSummary } from "./customer-auth";
 import { db, type Tx } from "./db";
 import { env } from "./env";
 import { ApiException } from "./http";
@@ -112,15 +113,41 @@ export async function createOrResumeSession(tracking: Tracking): Promise<Booking
   const store = await cookies();
   const { session, token } = await startSession(store.get(SESSION_COOKIE)?.value, tracking);
   store.set(SESSION_COOKIE, token, cookieOptions());
-  return session;
+  const customer = await getCurrentCustomer();
+  return customer ? applyCustomerLogin(session, customer) : session;
+}
+
+/** A logged-in customer skips the OTP: an unverified session is marked verified with their phone. */
+export async function applyCustomerLogin(session: BookingSession, customer: Lead): Promise<BookingSession> {
+  if (session.bookingId || (session.phoneVerifiedAt && session.phoneE164)) return session;
+  return db.bookingSession.update({
+    where: { id: session.id },
+    data: {
+      pendingPhoneE164: customer.phoneE164,
+      phoneE164: customer.phoneE164,
+      phoneVerifiedAt: new Date(),
+      fullName: customer.fullName ?? session.fullName,
+    },
+  });
+}
+
+/** Customer from the cookie; null outside a request context (scripts, tests without cookies). */
+async function currentAccount() {
+  try {
+    const lead = await getCurrentCustomer();
+    return lead ? toAccountSummary(lead) : null;
+  } catch {
+    return null;
+  }
 }
 
 export async function toSessionView(session: BookingSession): Promise<BookingSessionView> {
-  const [settings, booking] = await Promise.all([
+  const [settings, booking, account] = await Promise.all([
     getSettings(),
     session.bookingId
       ? db.booking.findUnique({ where: { id: session.bookingId }, select: { reference: true } })
       : Promise.resolve(null),
+    currentAccount(),
   ]);
   return {
     pendingPhoneE164: session.pendingPhoneE164,
@@ -132,6 +159,7 @@ export async function toSessionView(session: BookingSession): Promise<BookingSes
     coachTimeZone: settings.coachTimeZone,
     bookingReference: booking?.reference ?? null,
     upcomingBooking: await upcomingFor(session),
+    account,
   };
 }
 

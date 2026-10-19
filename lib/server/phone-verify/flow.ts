@@ -5,7 +5,8 @@ import type { BookingSession } from "@/generated/prisma/client";
 import type { SendCodeResponse } from "@/lib/shared/api";
 import { maskPhone, normalizePhone } from "@/lib/shared/validation";
 import { hmac } from "../crypto";
-import { db } from "../db";
+import { startCustomerSession, upsertAccount } from "../customer-auth";
+import { db, TX_OPTIONS } from "../db";
 import { env } from "../env";
 import { ApiException } from "../http";
 import { logEvent, reportError } from "../observability";
@@ -55,7 +56,7 @@ async function releaseCooldown(sessionId: string) {
 
 export async function sendPhoneCode(
   session: BookingSession,
-  input: { country: string; phone: string },
+  input: { country: string; phone: string; fullName?: string; mode?: "signup" | "login" },
   ip: string,
 ): Promise<SendCodeResponse> {
   assertNotBooked(session);
@@ -89,6 +90,8 @@ export async function sendPhoneCode(
     data: {
       pendingPhoneE164: e164,
       ...(changedNumber ? { phoneE164: null, phoneVerifiedAt: null } : {}),
+      // Signup carries the name to use if this number has no account yet. Login never guesses a name.
+      ...(input.fullName?.trim() ? { fullName: input.fullName.trim() } : input.mode === "login" ? { fullName: null } : {}),
     },
   });
 
@@ -132,10 +135,56 @@ export async function verifyPhoneCode(session: BookingSession, code: string, ip:
   if (!result.approved) throw new ApiException(400, "OTP_INVALID", "That code is incorrect or has expired.");
 
   logEvent("phone_verified", { sessionId: session.id });
-  return db.bookingSession.update({
-    where: { id: session.id },
-    data: { phoneE164: pending, phoneVerifiedAt: new Date() },
-  });
+  const { updated, lead } = await db.$transaction(async (tx) => {
+    // A brand-new number with no name yet (login mode) gets its account once the name is known.
+    const known = await tx.lead.findUnique({ where: { phoneE164: pending }, select: { id: true } });
+    const lead =
+      known || session.fullName?.trim()
+        ? await upsertAccount(tx, {
+            phoneE164: pending,
+            fullName: session.fullName,
+            source: session.source,
+            campaign: session.campaign,
+            manychatSubscriberId: session.manychatSubscriberId,
+          })
+        : null;
+    const updated = await tx.bookingSession.update({
+      where: { id: session.id },
+      data: { phoneE164: pending, phoneVerifiedAt: new Date(), fullName: lead?.fullName ?? session.fullName },
+    });
+    return { updated, lead };
+  }, TX_OPTIONS);
+  // Existing account, or a name given at signup → logged in. Otherwise the UI asks for a name
+  // and calls POST /api/booking/account (createAccountForSession).
+  if (lead?.fullName?.trim()) await startCustomerSession(lead.id);
+  return updated;
+}
+
+// ---------------------------------------------------------------- step 1c: name for a new account
+
+/** Finishes account creation after phone verification (number had no account and no name). Logs in. */
+export async function createAccountForSession(session: BookingSession, fullName: string): Promise<BookingSession> {
+  if (!session.phoneVerifiedAt || !session.phoneE164) {
+    throw new ApiException(403, "PHONE_NOT_VERIFIED", "Verify your phone number first.");
+  }
+  const phoneE164 = session.phoneE164;
+  const { updated, lead } = await db.$transaction(async (tx) => {
+    const lead = await upsertAccount(tx, {
+      phoneE164,
+      fullName,
+      source: session.source,
+      campaign: session.campaign,
+      manychatSubscriberId: session.manychatSubscriberId,
+    });
+    const updated = await tx.bookingSession.update({
+      where: { id: session.id },
+      data: { fullName: lead.fullName ?? fullName.trim() },
+    });
+    return { updated, lead };
+  }, TX_OPTIONS);
+  await startCustomerSession(lead.id);
+  logEvent("account_created", { sessionId: session.id, leadId: lead.id });
+  return updated;
 }
 
 // ---------------------------------------------------------------- step 2: contact

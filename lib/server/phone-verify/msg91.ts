@@ -24,7 +24,7 @@ const ACCOUNT_ERROR = /auth ?key|template|ip ?not|blocked|balance/i;
 export async function start(phoneE164: string): Promise<StartResult> {
   const e = env();
   if (!e.MSG91_AUTH_KEY || !e.MSG91_OTP_TEMPLATE_ID) return { ok: false, error: NOT_CONFIGURED };
-  const url = `${BASE}?template_id=${encodeURIComponent(e.MSG91_OTP_TEMPLATE_ID)}&mobile=${digits(phoneE164)}`;
+  const url = `${BASE}?template_id=${encodeURIComponent(e.MSG91_OTP_TEMPLATE_ID)}&mobile=${digits(phoneE164)}&otp_length=6&otp_expiry=5`;
   const res = await fetch(url, {
     method: "POST",
     headers: { authkey: e.MSG91_AUTH_KEY, "Content-Type": "application/json" },
@@ -39,7 +39,7 @@ export async function start(phoneE164: string): Promise<StartResult> {
 export async function check(phoneE164: string, code: string): Promise<CheckResult> {
   const e = env();
   if (!e.MSG91_AUTH_KEY) return { ok: false, error: NOT_CONFIGURED };
-  const url = `${BASE}/verify?otp=${encodeURIComponent(code)}&mobile=${digits(phoneE164)}`;
+  const url = `${BASE}/verify?otp=${encodeURIComponent(code)}&mobile=${digits(phoneE164)}&otp_length=6&otp_expiry=5`;
   const res = await fetch(url, { method: "GET", headers: { authkey: e.MSG91_AUTH_KEY }, cache: "no-store" });
   const body = await readBody(res);
   if (body.type === "success") return { ok: true, approved: true };

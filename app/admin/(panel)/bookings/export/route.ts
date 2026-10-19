@@ -3,6 +3,7 @@ import { DateTime } from "luxon";
 import { getCurrentAdmin } from "@/lib/server/admin/auth";
 import { bookingWhere, parseBookingFilters } from "@/lib/server/admin/bookings-query";
 import { csvRow } from "@/lib/server/admin/csv";
+import { latestQuote } from "@/lib/server/admin/quote-summary";
 import { db } from "@/lib/server/db";
 import { apiError } from "@/lib/server/http";
 import { logEvent, reportError } from "@/lib/server/observability";
@@ -18,6 +19,7 @@ const HEADER = [
   "coach_time_zone",
   "customer_time_zone",
   "full_name",
+  "client_code",
   "phone_e164",
   "email",
   "phone_verified_at",
@@ -30,6 +32,8 @@ const HEADER = [
   "booked_at",
   "converted_at",
   "deal_value_inr",
+  "latest_quote_status",
+  "latest_quote_amount_inr",
 ];
 
 /** GET /admin/bookings/export?<same filters as the bookings page> → CSV download. */
@@ -57,7 +61,13 @@ export async function GET(request: NextRequest) {
         }
         const rows = await db.booking.findMany({
           where,
-          include: { lead: true },
+          include: {
+            lead: {
+              include: {
+                quotes: { orderBy: { createdAt: "desc" }, take: 1, select: { status: true, amountInr: true, createdAt: true } },
+              },
+            },
+          },
           orderBy: [{ startsAt: "desc" }, { id: "asc" }],
           take: BATCH,
           ...(cursor ? { skip: 1, cursor: { id: cursor } } : {}),
@@ -68,8 +78,9 @@ export async function GET(request: NextRequest) {
         }
         cursor = rows[rows.length - 1]!.id;
         const chunk = rows
-          .map((b) =>
-            csvRow([
+          .map((b) => {
+            const quote = latestQuote(b.lead.quotes);
+            return csvRow([
               b.reference,
               b.status,
               iso(b.startsAt),
@@ -77,6 +88,7 @@ export async function GET(request: NextRequest) {
               tz,
               b.customerTimeZone,
               b.lead.fullName,
+              b.lead.clientCode,
               b.lead.phoneE164,
               b.lead.email,
               iso(b.lead.phoneVerifiedAt),
@@ -89,8 +101,10 @@ export async function GET(request: NextRequest) {
               iso(b.createdAt),
               iso(b.convertedAt),
               b.dealValueInr,
-            ]),
-          )
+              quote?.status,
+              quote?.amountInr,
+            ]);
+          })
           .join("");
         controller.enqueue(encoder.encode(chunk));
         if (rows.length < BATCH) controller.close();

@@ -5,6 +5,9 @@ import { db } from "../db";
 const DAY = 86_400_000;
 
 export type UnbookedLead = {
+  /** Set when the number already has an account (Lead). */
+  leadId: string | null;
+  clientCode: string | null;
   phoneE164: string;
   fullName: string | null;
   email: string | null;
@@ -30,6 +33,8 @@ export async function getVerifiedUnbooked(days: number, now = new Date()): Promi
     const existing = byPhone.get(phone);
     if (!existing) {
       byPhone.set(phone, {
+        leadId: null,
+        clientCode: null,
         phoneE164: phone,
         fullName: s.fullName,
         email: s.email,
@@ -50,14 +55,20 @@ export async function getVerifiedUnbooked(days: number, now = new Date()): Promi
 
   const leads = await db.lead.findMany({
     where: { phoneE164: { in: [...byPhone.keys()] } },
-    select: { phoneE164: true, bookings: { select: { createdAt: true, status: true, startsAt: true } } },
+    select: { id: true, fullName: true, clientCode: true, phoneE164: true, bookings: { select: { createdAt: true, status: true, startsAt: true } } },
   });
   for (const lead of leads) {
     const entry = byPhone.get(lead.phoneE164);
     if (!entry) continue;
     const bookedLater = lead.bookings.some((b) => b.createdAt >= entry.verifiedAt);
     const hasUpcoming = lead.bookings.some((b) => b.status === "CONFIRMED" && b.startsAt > now);
-    if (bookedLater || hasUpcoming) byPhone.delete(lead.phoneE164);
+    if (bookedLater || hasUpcoming) {
+      byPhone.delete(lead.phoneE164);
+      continue;
+    }
+    entry.leadId = lead.id;
+    entry.clientCode = lead.clientCode;
+    entry.fullName = lead.fullName ?? entry.fullName;
   }
   return [...byPhone.values()];
 }
@@ -71,7 +82,7 @@ export type RebookCandidate = {
   cancelReason: string | null;
   source: string | null;
   campaign: string | null;
-  lead: { fullName: string | null; phoneE164: string; email: string | null };
+  lead: { id: string; clientCode: string | null; fullName: string | null; phoneE164: string; email: string | null };
 };
 
 /** No-shows (call in the last N days) and cancellations (cancelled in the last N days) not yet re-booked. */
@@ -89,6 +100,8 @@ export async function getRebookCandidates(days = 14, now = new Date()): Promise<
     include: {
       lead: {
         select: {
+          id: true,
+          clientCode: true,
           fullName: true,
           phoneE164: true,
           email: true,
@@ -113,7 +126,13 @@ export async function getRebookCandidates(days = 14, now = new Date()): Promise<
       cancelReason: b.cancelReason,
       source: b.source,
       campaign: b.campaign,
-      lead: { fullName: b.lead.fullName, phoneE164: b.lead.phoneE164, email: b.lead.email },
+      lead: {
+        id: b.lead.id,
+        clientCode: b.lead.clientCode,
+        fullName: b.lead.fullName,
+        phoneE164: b.lead.phoneE164,
+        email: b.lead.email,
+      },
     });
   }
   return out;

@@ -4,8 +4,10 @@ import { z } from "zod";
 import type { Prisma } from "@/generated/prisma/client";
 import { requireAdmin } from "@/lib/server/admin/auth";
 import { fmtDateTime, whatsappUrl } from "@/lib/server/admin/format";
+import { summarizeQuotes } from "@/lib/server/admin/quote-summary";
 import { db } from "@/lib/server/db";
 import { getSettings } from "@/lib/server/settings";
+import { ClientCode } from "../../_components/ClientCode";
 import { StatusBadge } from "../../_components/StatusBadge";
 
 export const metadata: Metadata = { title: "Leads" };
@@ -28,6 +30,7 @@ export default async function LeadsPage({ searchParams }: PageProps<"/admin/lead
     const or: Prisma.LeadWhereInput[] = [
       { fullName: { contains: q, mode: "insensitive" } },
       { email: { contains: q, mode: "insensitive" } },
+      { clientCode: { contains: q, mode: "insensitive" } },
       { campaign: { contains: q, mode: "insensitive" } },
     ];
     const digits = q.replace(/\D/g, "");
@@ -45,6 +48,7 @@ export default async function LeadsPage({ searchParams }: PageProps<"/admin/lead
       include: {
         _count: { select: { bookings: true } },
         bookings: { orderBy: { createdAt: "desc" }, take: 1, select: { id: true, status: true, startsAt: true } },
+        quotes: { select: { status: true, amountInr: true, createdAt: true } },
       },
     }),
   ]);
@@ -59,7 +63,7 @@ export default async function LeadsPage({ searchParams }: PageProps<"/admin/lead
       <form className="adm-filters" method="get" role="search" aria-label="Search leads">
         <label className="adm-field adm-field-grow">
           <span>Search</span>
-          <input name="q" type="search" defaultValue={q} placeholder="Name, phone, email or campaign" />
+          <input name="q" type="search" defaultValue={q} placeholder="Name, phone, client ID, email or campaign" />
         </label>
         <div className="adm-filter-actions">
           <button type="submit" className="adm-btn adm-btn-primary">
@@ -77,25 +81,28 @@ export default async function LeadsPage({ searchParams }: PageProps<"/admin/lead
         <table className="adm-table">
           <thead>
             <tr>
-              <th scope="col">Phone</th>
+              <th scope="col">Phone / client ID</th>
               <th scope="col">Name</th>
+              <th scope="col">Latest booking</th>
+              <th scope="col">Quote</th>
+              <th scope="col">Bookings</th>
               <th scope="col">Email</th>
               <th scope="col">Source / campaign</th>
-              <th scope="col">Bookings</th>
-              <th scope="col">Latest booking</th>
               <th scope="col">Created</th>
             </tr>
           </thead>
           <tbody>
             {leads.length === 0 && (
               <tr>
-                <td colSpan={7} className="adm-empty">
+                <td colSpan={8} className="adm-empty">
                   No leads found.
                 </td>
               </tr>
             )}
             {leads.map((l) => {
               const latest = l.bookings[0];
+              const quote = summarizeQuotes(l.quotes);
+              const detailHref = latest ? `/admin/bookings/${latest.id}` : `/admin/leads/${l.id}`;
               return (
                 <tr key={l.id}>
                   <td className="adm-nowrap">
@@ -104,13 +111,11 @@ export default async function LeadsPage({ searchParams }: PageProps<"/admin/lead
                     </a>{" "}
                     <a href={whatsappUrl(l.phoneE164)} target="_blank" rel="noopener noreferrer" className="adm-small">
                       WA
-                    </a>
+                    </a>{" "}
+                    <ClientCode code={l.clientCode} />
                   </td>
-                  <td>{l.fullName ?? <span className="adm-muted">—</span>}</td>
-                  <td>{l.email ? <a href={`mailto:${l.email}`}>{l.email}</a> : <span className="adm-muted">—</span>}</td>
-                  <td>{[l.source, l.campaign].filter(Boolean).join(" / ") || "—"}</td>
                   <td>
-                    <Link href={`/admin/bookings?q=${encodeURIComponent(l.phoneE164)}`}>{l._count.bookings}</Link>
+                    <Link href={detailHref}>{l.fullName ?? "No name yet"}</Link>
                   </td>
                   <td className="adm-nowrap">
                     {latest ? (
@@ -118,9 +123,19 @@ export default async function LeadsPage({ searchParams }: PageProps<"/admin/lead
                         <StatusBadge status={latest.status} /> {fmtDateTime(latest.startsAt, tz)}
                       </Link>
                     ) : (
-                      "—"
+                      <span className="adm-muted">No booking</span>
                     )}
                   </td>
+                  <td className="adm-nowrap">
+                    <Link href={detailHref} className={`adm-quote-status-${quote.tone}`}>
+                      {quote.tone === "none" ? <span className="adm-muted">—</span> : quote.label}
+                    </Link>
+                  </td>
+                  <td>
+                    <Link href={`/admin/bookings?q=${encodeURIComponent(l.phoneE164)}`}>{l._count.bookings}</Link>
+                  </td>
+                  <td>{l.email ? <a href={`mailto:${l.email}`}>{l.email}</a> : <span className="adm-muted">—</span>}</td>
+                  <td>{[l.source, l.campaign].filter(Boolean).join(" / ") || "—"}</td>
                   <td className="adm-nowrap">{fmtDateTime(l.createdAt, tz)}</td>
                 </tr>
               );

@@ -36,7 +36,7 @@ export const viewport: Viewport = {
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
-    <html lang="en" className={`${archivo.variable} ${hanken.variable}`}>
+    <html lang="en" className={`${archivo.variable} ${hanken.variable}`} data-scroll-behavior="smooth">
       <body>{children}</body>
     </html>
   );

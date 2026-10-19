@@ -23,10 +23,16 @@ describe("normalizePhone", () => {
   });
 
   it("sendCodeSchema flags invalid numbers on the phone field", () => {
-    const r = sendCodeSchema.safeParse({ country: "IN", phone: "12345" });
+    const r = sendCodeSchema.safeParse({ country: "IN", phone: "12345", mode: "login" });
     expect(r.success).toBe(false);
     expect(r.error?.issues[0]?.path).toEqual(["phone"]);
-    expect(sendCodeSchema.safeParse({ country: "IN", phone: "9876543210" }).success).toBe(true);
+    expect(sendCodeSchema.safeParse({ country: "IN", phone: "9876543210", mode: "login" }).success).toBe(true);
+  });
+
+  it("sendCodeSchema requires a name for signup (the default mode)", () => {
+    const r = sendCodeSchema.safeParse({ country: "IN", phone: "9876543210" });
+    expect(r.error?.issues.map((i) => i.path)).toEqual([["fullName"]]);
+    expect(sendCodeSchema.safeParse({ country: "IN", phone: "9876543210", fullName: "Asha Rao" }).success).toBe(true);
   });
 });
 

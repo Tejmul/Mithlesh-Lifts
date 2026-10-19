@@ -1,5 +1,6 @@
 import "server-only";
 // OWNER: Agent B.
+import { DateTime } from "luxon";
 import type { Booking, BookingSession, Lead } from "@/generated/prisma/client";
 import type { BookingView } from "@/lib/shared/api";
 import { attachBookingToSession } from "../booking-session";
@@ -7,6 +8,7 @@ import { bookingReference, hmac, safeEqual } from "../crypto";
 import { db, TX_OPTIONS, isConstraintViolation } from "../db";
 import { env } from "../env";
 import { ApiException } from "../http";
+import { addInboxItem } from "../inbox";
 import { enqueueBookingEvent, kickNotifications } from "../notifications";
 import { logEvent, reportError } from "../observability";
 import { getAvailableSlots } from "../scheduling/availability";
@@ -148,6 +150,13 @@ export async function createBookingFromSession(input: {
         });
         await attachBookingToSession(tx, session.id, created.id);
         await enqueueBookingEvent(tx, created.id, "confirmed");
+        await addInboxItem(tx, {
+          leadId: lead.id,
+          kind: "booking_confirmed",
+          title: "Your call is booked",
+          body: `Our sales team will call you on ${formatCallTime(created)}.`,
+          bookingId: created.id,
+        });
         return created;
       }, TX_OPTIONS);
     } catch (err) {
@@ -169,6 +178,18 @@ export async function createBookingFromSession(input: {
   logEvent("booking.created", { bookingId: booking.id });
   safeKick();
   return booking;
+}
+
+/** "Tue 21 Oct at 10:00 AM (IST)" in the customer's time zone. */
+export function formatCallTime(booking: Pick<Booking, "startsAt" | "customerTimeZone">): string {
+  let dt = DateTime.fromJSDate(booking.startsAt).setZone(booking.customerTimeZone);
+  if (!dt.isValid) dt = DateTime.fromJSDate(booking.startsAt).setZone("Asia/Kolkata");
+  const names = [dt.setLocale("en-IN").offsetNameShort, dt.setLocale("en-US").offsetNameShort].filter(
+    (n): n is string => Boolean(n),
+  );
+  const zone = names.find((n) => !n.startsWith("GMT") && !n.startsWith("UTC")) ?? names[0] ?? "";
+  const when = `${dt.setLocale("en-GB").toFormat("ccc d LLL")} at ${dt.setLocale("en-US").toFormat("h:mm a")}`;
+  return zone ? `${when} (${zone})` : when;
 }
 
 /** The number's next confirmed call, if any — shown to returning visitors after they verify. */
@@ -213,6 +234,13 @@ export async function cancelBooking(input: { bookingId: string; actor: Actor; re
     });
     if (res.count !== 1) throw staleLink();
     await enqueueBookingEvent(tx, booking.id, "cancelled");
+    await addInboxItem(tx, {
+      leadId: booking.leadId,
+      kind: "booking_cancelled",
+      title: "Your call was cancelled",
+      body: `Your call on ${formatCallTime(booking)} was cancelled. Book a new time whenever you're ready.`,
+      bookingId: booking.id,
+    });
     return tx.booking.findUniqueOrThrow({ where: { id: booking.id }, include: { lead: true } });
   }, TX_OPTIONS);
 
@@ -253,7 +281,15 @@ export async function rescheduleBooking(input: {
       });
       if (res.count !== 1) throw staleLink();
       await enqueueBookingEvent(tx, booking.id, "rescheduled");
-      return tx.booking.findUniqueOrThrow({ where: { id: booking.id }, include: { lead: true } });
+      const moved = await tx.booking.findUniqueOrThrow({ where: { id: booking.id }, include: { lead: true } });
+      await addInboxItem(tx, {
+        leadId: moved.leadId,
+        kind: "booking_rescheduled",
+        title: "Your call was moved",
+        body: `Our sales team will now call you on ${formatCallTime(moved)}.`,
+        bookingId: moved.id,
+      });
+      return moved;
     }, TX_OPTIONS);
   } catch (err) {
     if (err instanceof ApiException) throw err;

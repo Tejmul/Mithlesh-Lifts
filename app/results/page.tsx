@@ -21,7 +21,7 @@ export default function ResultsPage() {
         <div className="results-grid">
           {results.map((r, i) => (
             <div key={r.name} data-reveal data-reveal-delay={(i % 4) + 1}>
-              <ResultCard r={r} sizes="(max-width: 640px) 100vw, (max-width: 1080px) 50vw, 25vw" />
+              <ResultCard r={r} preload={i === 0} sizes="(max-width: 640px) 100vw, (max-width: 1080px) 50vw, 25vw" />
             </div>
           ))}
         </div>
