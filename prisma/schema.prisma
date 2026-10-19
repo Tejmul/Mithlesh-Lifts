@@ -1,0 +1,295 @@
+// Mithilesh Reddy × Coach Scale Systems — sales-call booking.
+// Flow: ManyChat link → verify phone (OTP via Twilio Verify / MSG91) → name + email → pick slot → booked.
+// All timestamps are UTC (timestamptz). Time zones are IANA names.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ---------------------------------------------------------------- settings
+
+/// Singleton row (id = 1). Edited from /admin/availability.
+model Settings {
+  id                     Int      @id @default(1)
+  coachTimeZone          String   @default("Asia/Kolkata")
+  callMinutes            Int      @default(30)
+  bufferMinutes          Int      @default(15)
+  slotIntervalMinutes    Int      @default(30)
+  minNoticeMinutes       Int      @default(240)
+  maxAdvanceDays         Int      @default(21)
+  /// Customers can reschedule/cancel until this many minutes before the call.
+  manageCutoffMinutes    Int      @default(120)
+  meetingUrl             String?
+  /// Team inboxes that get a "new call booked" email.
+  teamNotificationEmails String[] @default([])
+  updatedAt              DateTime @updatedAt
+}
+
+/// Recurring weekly hours in the coach's time zone. weekday: 1 = Monday … 7 = Sunday.
+model WeeklyHours {
+  id          String @id @default(cuid())
+  weekday     Int
+  startMinute Int
+  endMinute   Int
+
+  @@index([weekday])
+}
+
+/// A whole day off (holiday, travel) in the coach's time zone.
+model DayOff {
+  id     String  @id @default(cuid())
+  date   String  @unique // YYYY-MM-DD
+  reason String?
+}
+
+// ---------------------------------------------------------------- leads & sessions
+
+model Lead {
+  id                   String    @id @default(cuid())
+  /// Optional: the booking flow is number → OTP → slot. The sales team fills these in after the call.
+  fullName             String?
+  phoneE164            String    @unique
+  phoneVerifiedAt      DateTime  @db.Timestamptz(3)
+  email                String?
+  source               String?
+  campaign             String?
+  manychatSubscriberId String?
+  marketingConsentAt   DateTime? @db.Timestamptz(3)
+  /// Customer-facing account ID, e.g. "RAHUL-4821". Quoted on sales calls.
+  clientCode           String?   @unique
+  lastLoginAt          DateTime? @db.Timestamptz(3)
+  createdAt            DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt            DateTime  @updatedAt @db.Timestamptz(3)
+
+  bookings Booking[]
+  sessions CustomerSession[]
+  inbox    InboxItem[]
+  quotes   Quote[]
+
+  @@index([email])
+  @@index([createdAt])
+}
+
+/// Server-side state for one visitor on /book. The httpOnly cookie holds only a random token.
+model BookingSession {
+  id                   String    @id @default(cuid())
+  tokenHash            String    @unique
+  /// Number the OTP was last sent to. Verification only counts for this exact number.
+  pendingPhoneE164     String?
+  phoneE164            String?
+  phoneVerifiedAt      DateTime? @db.Timestamptz(3)
+  fullName             String?
+  email                String?
+  marketingConsent     Boolean   @default(false)
+  source               String?
+  campaign             String?
+  manychatSubscriberId String?
+  bookingId            String?   @unique
+  expiresAt            DateTime  @db.Timestamptz(3)
+  createdAt            DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt            DateTime  @updatedAt @db.Timestamptz(3)
+}
+
+/// Fixed-window rate-limit counters (OTP sends/checks, booking, admin login).
+model RateLimit {
+  key         String
+  windowStart DateTime @db.Timestamptz(3)
+  count       Int      @default(0)
+
+  @@id([key, windowStart])
+  @@index([windowStart])
+}
+
+// ---------------------------------------------------------------- bookings
+
+enum BookingStatus {
+  CONFIRMED
+  CANCELLED
+  COMPLETED
+  NO_SHOW
+}
+
+model Booking {
+  id               String        @id @default(cuid())
+  reference        String        @unique
+  leadId           String
+  startsAt         DateTime      @db.Timestamptz(3)
+  endsAt           DateTime      @db.Timestamptz(3)
+  /// endsAt + buffer. The overlap exclusion constraint covers [startsAt, blockedUntil).
+  blockedUntil     DateTime      @db.Timestamptz(3)
+  customerTimeZone String
+  status           BookingStatus @default(CONFIRMED)
+  meetingUrl       String?
+  /// Bumped on reschedule: invalidates old manage links, keys new notifications.
+  version          Int           @default(1)
+  idempotencyKey   String        @unique
+  source           String?
+  campaign         String?
+  internalNotes    String?
+  cancelReason     String?
+  /// Sales outcome, recorded by the team after the call.
+  convertedAt      DateTime?     @db.Timestamptz(3)
+  /// Amount the client paid / agreed, in whole rupees.
+  dealValueInr     Int?
+  createdAt        DateTime      @default(now()) @db.Timestamptz(3)
+  cancelledAt      DateTime?     @db.Timestamptz(3)
+  rescheduledAt    DateTime?     @db.Timestamptz(3)
+  updatedAt        DateTime      @updatedAt @db.Timestamptz(3)
+
+  lead          Lead           @relation(fields: [leadId], references: [id])
+  notifications Notification[]
+
+  @@index([startsAt])
+  @@index([status, startsAt])
+  @@index([leadId])
+}
+
+// ---------------------------------------------------------------- email outbox (Resend)
+
+enum NotificationStatus {
+  PENDING
+  SENDING
+  SENT
+  FAILED
+  CANCELLED
+}
+
+/// Every email is written here inside the booking transaction, then sent by a worker with retries.
+/// Reminders are rows with a future sendAfter.
+model Notification {
+  id                String             @id @default(cuid())
+  bookingId         String?
+  kind              String // booking_confirmed | booking_rescheduled | booking_cancelled | reminder | team_new_booking | team_booking_changed
+  recipient         String
+  payload           Json
+  idempotencyKey    String             @unique
+  status            NotificationStatus @default(PENDING)
+  attempts          Int                @default(0)
+  sendAfter         DateTime           @default(now()) @db.Timestamptz(3)
+  lockedUntil       DateTime?          @db.Timestamptz(3)
+  lastError         String?
+  providerMessageId String?
+  sentAt            DateTime?          @db.Timestamptz(3)
+  createdAt         DateTime           @default(now()) @db.Timestamptz(3)
+
+  booking Booking? @relation(fields: [bookingId], references: [id], onDelete: SetNull)
+
+  @@index([status, sendAfter])
+  @@index([bookingId])
+}
+
+// ---------------------------------------------------------------- admin
+
+model AdminUser {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  name         String
+  passwordHash String
+  lastLoginAt  DateTime? @db.Timestamptz(3)
+  createdAt    DateTime  @default(now()) @db.Timestamptz(3)
+
+  sessions AdminSession[]
+}
+
+model AdminSession {
+  id          String   @id @default(cuid())
+  tokenHash   String   @unique
+  adminUserId String
+  expiresAt   DateTime @db.Timestamptz(3)
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+
+  adminUser AdminUser @relation(fields: [adminUserId], references: [id], onDelete: Cascade)
+
+  @@index([adminUserId])
+}
+
+// ---------------------------------------------------------------- customer accounts
+
+/// Logged-in customer (account = Lead, identified by verified phone). Cookie holds a random token.
+model CustomerSession {
+  id        String   @id @default(cuid())
+  tokenHash String   @unique
+  leadId    String
+  expiresAt DateTime @db.Timestamptz(3)
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+
+  lead Lead @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  @@index([leadId])
+}
+
+/// In-app notification shown in the customer's bell / inbox.
+model InboxItem {
+  id        String    @id @default(cuid())
+  leadId    String
+  /// booking_confirmed | booking_rescheduled | booking_cancelled | quote_sent | payment_received
+  kind      String
+  title     String
+  body      String
+  bookingId String?
+  quoteId   String?
+  readAt    DateTime? @db.Timestamptz(3)
+  createdAt DateTime  @default(now()) @db.Timestamptz(3)
+
+  lead Lead @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  @@index([leadId, createdAt])
+}
+
+// ---------------------------------------------------------------- quotes & payments
+
+enum QuoteStatus {
+  SENT
+  PAID
+  CANCELLED
+}
+
+/// A price the sales team sends a client after the call.
+model Quote {
+  id               String      @id @default(cuid())
+  reference        String      @unique // e.g. "Q-7K3P9Q"
+  leadId           String
+  bookingId        String?
+  planName         String
+  amountInr        Int // whole rupees
+  note             String?
+  status           QuoteStatus @default(SENT)
+  createdByAdminId String?
+  createdAt        DateTime    @default(now()) @db.Timestamptz(3)
+  paidAt           DateTime?   @db.Timestamptz(3)
+  cancelledAt      DateTime?   @db.Timestamptz(3)
+
+  lead     Lead      @relation(fields: [leadId], references: [id])
+  payments Payment[]
+
+  @@index([leadId, createdAt])
+  @@index([status])
+}
+
+enum PaymentStatus {
+  CREATED
+  PAID
+  FAILED
+}
+
+/// One checkout attempt for a quote. Verified server-side (signature / webhook) before marking PAID.
+model Payment {
+  id                String        @id @default(cuid())
+  quoteId           String
+  provider          String // razorpay | stripe
+  providerOrderId   String        @unique
+  providerPaymentId String?       @unique
+  amountInr         Int
+  status            PaymentStatus @default(CREATED)
+  createdAt         DateTime      @default(now()) @db.Timestamptz(3)
+  paidAt            DateTime?     @db.Timestamptz(3)
+
+  quote Quote @relation(fields: [quoteId], references: [id])
+
+  @@index([quoteId])
+}

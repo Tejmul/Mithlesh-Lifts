@@ -1,0 +1,24 @@
+# Local PostgreSQL for development and tests.
+#   docker compose up -d
+services:
+  db:
+    image: postgres:17-alpine
+    container_name: css-booking-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: css
+      POSTGRES_PASSWORD: css_local_only
+      POSTGRES_DB: css_dev
+    ports:
+      - "5433:5432"
+    volumes:
+      - css-booking-data:/var/lib/postgresql/data
+      - ./docker/init-test-db.sql:/docker-entrypoint-initdb.d/init-test-db.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U css -d css_dev"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  css-booking-data:
