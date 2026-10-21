@@ -12,14 +12,7 @@ export function SiteHeader({ current }: { current: NavKey }) {
           <span className="wordmark-sub">Coach Scale Systems</span>
         </Link>
         <div className="site-header-actions">
-          <AccountNav />
-          <Link
-            className="btn btn-primary btn-sm"
-            href="/book"
-            aria-current={current === "book" ? "page" : undefined}
-          >
-            Book a call
-          </Link>
+          <AccountNav bookCurrent={current === "book"} />
         </div>
       </div>
     </header>

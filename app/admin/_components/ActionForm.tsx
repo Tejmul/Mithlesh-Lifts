@@ -12,13 +12,20 @@ type Props = {
   className?: string;
   /** Rendered next to the submit button. */
   extra?: ReactNode;
+  /** Ask before submitting (for actions that are hard to undo). */
+  confirm?: string;
 };
 
 /** Form bound to a server action with inline success/error feedback. */
-export function ActionForm({ action, children, submitLabel, pendingLabel, variant = "primary", className, extra }: Props) {
+export function ActionForm({ action, children, submitLabel, pendingLabel, variant = "primary", className, extra, confirm }: Props) {
   const [state, formAction, pending] = useActionState<ActionState, FormData>(action, null);
   return (
-    <form action={formAction} className={className ? `adm-form ${className}` : "adm-form"} noValidate>
+    <form
+      action={formAction}
+      className={className ? `adm-form ${className}` : "adm-form"}
+      noValidate
+      onSubmit={confirm ? (e) => void (!window.confirm(confirm) && e.preventDefault()) : undefined}
+    >
       {children}
       {state?.fields && (
         <ul className="adm-field-errors">

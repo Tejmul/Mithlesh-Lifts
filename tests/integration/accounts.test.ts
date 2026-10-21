@@ -15,12 +15,12 @@ import type { BookingSession } from "@/generated/prisma/client";
 import { createOrResumeSession, SESSION_COOKIE, startSession, toSessionView } from "@/lib/server/booking-session";
 import { cancelBooking, createBookingFromSession, rescheduleBooking } from "@/lib/server/bookings/service";
 import { hashToken } from "@/lib/server/crypto";
-import { CUSTOMER_COOKIE, getCurrentCustomer, logoutCustomer, requireCustomer } from "@/lib/server/customer-auth";
+import { CUSTOMER_COOKIE, getCurrentCustomer, logoutCustomer, requireCustomer, updateProfile } from "@/lib/server/customer-auth";
 import { db } from "@/lib/server/db";
 import { clearOutbox, readOutbox } from "@/lib/server/dev-outbox";
 import { ApiException } from "@/lib/server/http";
 import { listInbox, markInboxRead } from "@/lib/server/inbox";
-import { createAccountForSession, sendPhoneCode, verifyPhoneCode } from "@/lib/server/phone-verify/flow";
+import { sendPhoneCode, verifyPhoneCode } from "@/lib/server/phone-verify/flow";
 import { resetMockPhoneVerify } from "@/lib/server/phone-verify/mock";
 import { getAvailableSlots } from "@/lib/server/scheduling/availability";
 import { resetDb, seedSchedule } from "../helpers/db";
@@ -39,10 +39,17 @@ function codeFor(to: string) {
 const fresh = (s: BookingSession) => db.bookingSession.findUniqueOrThrow({ where: { id: s.id } });
 const newSession = async () => (await startSession(undefined, {})).session;
 
-async function verifyWith(input: { fullName?: string; mode?: "signup" | "login" }) {
+async function verifyNumber() {
   const session = await newSession();
-  await sendPhoneCode(session, { ...IN, ...input }, IP);
+  await sendPhoneCode(session, IN, IP);
   return verifyPhoneCode(await fresh(session), codeFor(IN_E164), IP);
+}
+
+/** Number + OTP, then the optional name from /account. */
+async function verifyWith(fullName?: string) {
+  const verified = await verifyNumber();
+  if (fullName) await updateProfile(await requireCustomer(), { fullName });
+  return fresh(verified);
 }
 
 async function expectApiError(p: Promise<unknown>, status: number, code: string) {
@@ -65,12 +72,12 @@ afterAll(async () => {
   await db.$disconnect();
 });
 
-describe("signup / login", () => {
-  it("signup creates an account with a client code and logs the customer in", async () => {
-    const verified = await verifyWith({ fullName: "Rahul Sharma", mode: "signup" });
+describe("number → OTP = account + login", () => {
+  it("a new number gets a nameless account and is logged in straight away", async () => {
+    const verified = await verifyNumber();
     const lead = await db.lead.findUniqueOrThrow({ where: { phoneE164: IN_E164 } });
-    expect(lead.fullName).toBe("Rahul Sharma");
-    expect(lead.clientCode).toMatch(/^RAHUL-\d{4}$/);
+    expect(lead.fullName).toBeNull();
+    expect(lead.clientCode).toMatch(/^CLIENT-\d{4}$/);
     expect(lead.lastLoginAt).not.toBeNull();
 
     const token = jar.get(CUSTOMER_COOKIE);
@@ -81,66 +88,70 @@ describe("signup / login", () => {
 
     const view = await toSessionView(verified);
     expect(view.phoneVerified).toBe(true);
-    expect(view.account).toEqual({ clientCode: lead.clientCode, fullName: "Rahul Sharma", phoneE164: IN_E164 });
+    expect(view.account).toEqual({ clientCode: lead.clientCode, fullName: null, phoneE164: IN_E164, email: null });
     expect((await requireCustomer()).id).toBe(lead.id);
   });
 
-  it("client codes fall back to CLIENT for names without Latin letters and trim long names", async () => {
-    await verifyWith({ fullName: "राहुल", mode: "signup" });
+  it("adding a name later gives a name-based client code", async () => {
+    await verifyWith("Rahul Sharma");
+    const lead = await db.lead.findUniqueOrThrow({ where: { phoneE164: IN_E164 } });
+    expect(lead.fullName).toBe("Rahul Sharma");
+    expect(lead.clientCode).toMatch(/^RAHUL-\d{4}$/);
+  });
+
+  it("client codes keep CLIENT for names without Latin letters and trim long names", async () => {
+    await verifyWith("राहुल");
     expect((await db.lead.findUniqueOrThrow({ where: { phoneE164: IN_E164 } })).clientCode).toMatch(/^CLIENT-\d{4}$/);
 
     await resetDb();
     clearOutbox();
-    await verifyWith({ fullName: "Bartholomew-Alexander Smith", mode: "signup" });
+    jar.clear();
+    await verifyWith("Bartholomew-Alexander Smith");
     expect((await db.lead.findUniqueOrThrow({ where: { phoneE164: IN_E164 } })).clientCode).toMatch(/^BARTHOLOME-\d{4}$/);
   });
 
-  it("login keeps the existing name and client code", async () => {
+  it("a returning number keeps its name and client code", async () => {
     await db.lead.create({
       data: { phoneE164: IN_E164, fullName: "Asha Rao", clientCode: "ASHA-1234", phoneVerifiedAt: new Date(0) },
     });
-    const verified = await verifyWith({ mode: "login" });
-    expect((await toSessionView(verified)).account).toEqual({ clientCode: "ASHA-1234", fullName: "Asha Rao", phoneE164: IN_E164 });
+    const verified = await verifyNumber();
+    expect((await toSessionView(verified)).account).toEqual({
+      clientCode: "ASHA-1234",
+      fullName: "Asha Rao",
+      phoneE164: IN_E164,
+      email: null,
+    });
     expect(verified.fullName).toBe("Asha Rao");
-
-    // A signup with another name for the same number does not overwrite the account.
-    jar.clear();
-    await verifyWith({ fullName: "Someone Else", mode: "signup" });
     const lead = await db.lead.findUniqueOrThrow({ where: { phoneE164: IN_E164 } });
-    expect(lead).toMatchObject({ fullName: "Asha Rao", clientCode: "ASHA-1234" });
     expect(lead.phoneVerifiedAt.getTime()).toBeGreaterThan(0);
   });
 
-  it("login for an unknown number verifies the phone but needs a name → createAccountForSession", async () => {
-    const verified = await verifyWith({ mode: "login" });
-    expect(jar.has(CUSTOMER_COOKIE)).toBe(false);
-    const view = await toSessionView(verified);
-    expect(view).toMatchObject({ phoneVerified: true, account: null });
-    expect(await db.lead.count()).toBe(0);
+  it("saving an email sends the booking confirmation + reminders for the upcoming call", async () => {
+    await seedSchedule();
+    const session = await verifyNumber();
+    const { slots } = await getAvailableSlots();
+    // Far enough out that both reminders (24 h, 1 h) are still in the future.
+    const slot = slots.find((s) => s.start.getTime() > Date.now() + 2 * 86_400_000)!;
+    await createBookingFromSession({
+      session: await fresh(session),
+      start: slot.start,
+      customerTimeZone: "Asia/Kolkata",
+      idempotencyKey: randomUUID(),
+    });
+    expect(await db.notification.count({ where: { recipient: "asha@example.com" } })).toBe(0);
 
-    const done = await createAccountForSession(verified, "Priya Nair");
-    const lead = await db.lead.findUniqueOrThrow({ where: { phoneE164: IN_E164 } });
-    expect(lead).toMatchObject({ fullName: "Priya Nair" });
-    expect(lead.clientCode).toMatch(/^PRIYA-\d{4}$/);
-    expect(jar.has(CUSTOMER_COOKIE)).toBe(true);
-    expect((await toSessionView(done)).account?.clientCode).toBe(lead.clientCode);
-  });
+    const lead = await updateProfile(await requireCustomer(), { email: "Asha@Example.com" });
+    expect(lead.email).toBe("asha@example.com");
+    const kinds = (await db.notification.findMany({ where: { recipient: "asha@example.com" } })).map((n) => n.kind).sort();
+    expect(kinds).toEqual(["booking_confirmed", "reminder", "reminder"]);
 
-  it("createAccountForSession requires a verified phone", async () => {
-    await expectApiError(createAccountForSession(await newSession(), "Priya Nair"), 403, "PHONE_NOT_VERIFIED");
-  });
-
-  it("a nameless legacy lead gets a proper code once the name is known", async () => {
-    await db.lead.create({ data: { phoneE164: IN_E164, phoneVerifiedAt: new Date() } });
-    const verified = await verifyWith({ mode: "login" });
-    expect(jar.has(CUSTOMER_COOKIE)).toBe(false);
-    expect((await db.lead.findUniqueOrThrow({ where: { phoneE164: IN_E164 } })).clientCode).toMatch(/^CLIENT-\d{4}$/);
-    await createAccountForSession(verified, "Kiran Das");
-    expect((await db.lead.findUniqueOrThrow({ where: { phoneE164: IN_E164 } })).clientCode).toMatch(/^KIRAN-\d{4}$/);
+    // Saving the same email again doesn't queue duplicates.
+    await updateProfile(lead, { email: "asha@example.com" });
+    expect(await db.notification.count({ where: { recipient: "asha@example.com" } })).toBe(3);
   });
 
   it("a logged-in customer starting /book skips the OTP", async () => {
-    await verifyWith({ fullName: "Rahul Sharma", mode: "signup" });
+    await verifyWith("Rahul Sharma");
     jar.delete(SESSION_COOKIE); // new device tab / expired booking session, still logged in
     const session = await createOrResumeSession({});
     expect(session).toMatchObject({ phoneE164: IN_E164, fullName: "Rahul Sharma" });
@@ -149,7 +160,7 @@ describe("signup / login", () => {
   });
 
   it("logout deletes the session row and cookie", async () => {
-    await verifyWith({ fullName: "Rahul Sharma", mode: "signup" });
+    await verifyWith("Rahul Sharma");
     await logoutCustomer();
     expect(jar.has(CUSTOMER_COOKIE)).toBe(false);
     expect(await db.customerSession.count()).toBe(0);
@@ -160,7 +171,7 @@ describe("signup / login", () => {
   it("expired or unknown customer cookies are ignored", async () => {
     jar.set(CUSTOMER_COOKIE, "bogus");
     expect(await getCurrentCustomer()).toBeNull();
-    await verifyWith({ fullName: "Rahul Sharma", mode: "signup" });
+    await verifyWith("Rahul Sharma");
     await db.customerSession.updateMany({ data: { expiresAt: new Date(Date.now() - 1000) } });
     expect(await getCurrentCustomer()).toBeNull();
     expect(await db.customerSession.count()).toBe(0);
@@ -170,7 +181,7 @@ describe("signup / login", () => {
 describe("in-app booking notifications", () => {
   it("adds inbox items when a call is booked, moved and cancelled", async () => {
     await seedSchedule();
-    const session = await verifyWith({ fullName: "Rahul Sharma", mode: "signup" });
+    const session = await verifyWith("Rahul Sharma");
     const lead = await requireCustomer();
     const { slots } = await getAvailableSlots();
     const booking = await createBookingFromSession({

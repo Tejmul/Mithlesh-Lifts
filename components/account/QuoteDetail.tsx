@@ -39,7 +39,7 @@ export function QuoteDetail({ id }: { id: string }) {
       .then((r) => !cancelled && setQuote(r.quote))
       .catch((err: unknown) => {
         if (cancelled) return;
-        if (err instanceof ApiError && err.status === 401) return router.replace(`/book?login=1&next=/account/quotes/${id}`);
+        if (err instanceof ApiError && err.status === 401) return router.replace(`/book?next=/account/quotes/${id}`);
         setLoadError(err instanceof ApiError && err.status === 404 ? "We couldn't find this quote." : "We couldn't load this quote. Try again.");
       });
     return () => {
@@ -107,12 +107,14 @@ export function QuoteDetail({ id }: { id: string }) {
       <p className="eyebrow">Quote {quote.reference}</p>
       <h1 className="quote-plan">{quote.planName}</h1>
       <p className="quote-amount">{inr(quote.amountInr)}</p>
+      {quote.duration && <p className="muted">Plan length: {quote.duration}</p>}
       {quote.note && <p className="quote-note">{quote.note}</p>}
 
       {quote.status === "PAID" ? (
         <div className="notice notice-success" role="status">
           <p>
-            <strong>Paid. Welcome aboard!</strong> Our team will contact you with the next steps.
+            <strong>Paid. Welcome aboard!</strong> Your plan dates are on{" "}
+            <Link href="/account">your account</Link>. Our team will contact you with the next steps.
           </p>
         </div>
       ) : quote.status === "CANCELLED" ? (

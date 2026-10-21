@@ -1,5 +1,6 @@
 // Mithilesh Reddy × Coach Scale Systems — sales-call booking.
-// Flow: ManyChat link → verify phone (OTP via Twilio Verify / MSG91) → name + email → pick slot → booked.
+// Flow (docs/FLOW.md): ManyChat link → phone + OTP → pick slot → booked + logged in → optional email
+// → sales call → quote (plan + ₹ + length) → paid → Membership (valid from/until) in /admin/clients.
 // All timestamps are UTC (timestamptz). Time zones are IANA names.
 
 generator client {
@@ -66,10 +67,11 @@ model Lead {
   createdAt            DateTime  @default(now()) @db.Timestamptz(3)
   updatedAt            DateTime  @updatedAt @db.Timestamptz(3)
 
-  bookings Booking[]
-  sessions CustomerSession[]
-  inbox    InboxItem[]
-  quotes   Quote[]
+  bookings    Booking[]
+  sessions    CustomerSession[]
+  inbox       InboxItem[]
+  quotes      Quote[]
+  memberships Membership[]
 
   @@index([email])
   @@index([createdAt])
@@ -249,6 +251,12 @@ enum QuoteStatus {
   CANCELLED
 }
 
+enum PlanUnit {
+  DAY
+  WEEK
+  MONTH
+}
+
 /// A price the sales team sends a client after the call.
 model Quote {
   id               String      @id @default(cuid())
@@ -257,6 +265,9 @@ model Quote {
   bookingId        String?
   planName         String
   amountInr        Int // whole rupees
+  /// Plan length, e.g. 3 MONTH. Sets the membership's valid-until date once paid.
+  durationCount    Int?
+  durationUnit     PlanUnit?
   note             String?
   status           QuoteStatus @default(SENT)
   createdByAdminId String?
@@ -264,8 +275,9 @@ model Quote {
   paidAt           DateTime?   @db.Timestamptz(3)
   cancelledAt      DateTime?   @db.Timestamptz(3)
 
-  lead     Lead      @relation(fields: [leadId], references: [id])
-  payments Payment[]
+  lead       Lead        @relation(fields: [leadId], references: [id])
+  payments   Payment[]
+  membership Membership?
 
   @@index([leadId, createdAt])
   @@index([status])
@@ -292,4 +304,30 @@ model Payment {
   quote Quote @relation(fields: [quoteId], references: [id])
 
   @@index([quoteId])
+}
+
+// ---------------------------------------------------------------- memberships
+
+/// A paid plan period. Created when a quote is paid (online or recorded by admin).
+/// Admin can edit the dates (late start, extension). Listed in /admin/clients.
+model Membership {
+  id         String   @id @default(cuid())
+  leadId     String
+  quoteId    String   @unique
+  planName   String
+  amountInr  Int // whole rupees actually paid
+  /// razorpay | manual
+  paidVia    String
+  paidAt     DateTime @db.Timestamptz(3)
+  validFrom  DateTime @db.Timestamptz(3)
+  validUntil DateTime @db.Timestamptz(3)
+  notes      String?
+  createdAt  DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt  DateTime @updatedAt @db.Timestamptz(3)
+
+  lead  Lead  @relation(fields: [leadId], references: [id])
+  quote Quote @relation(fields: [quoteId], references: [id])
+
+  @@index([leadId, validUntil])
+  @@index([validUntil])
 }

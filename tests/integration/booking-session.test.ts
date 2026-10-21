@@ -1,4 +1,14 @@
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+// Verifying a number logs the customer in, which sets a cookie: stand in for next/headers.
+const jar = vi.hoisted(() => new Map<string, string>());
+vi.mock("next/headers", () => ({
+  cookies: async () => ({
+    get: (name: string) => (jar.has(name) ? { name, value: jar.get(name)! } : undefined),
+    set: (name: string, value: string) => void jar.set(name, value),
+    delete: (opts: string | { name: string }) => void jar.delete(typeof opts === "string" ? opts : opts.name),
+  }),
+}));
 import type { BookingSession } from "@/generated/prisma/client";
 import { attachBookingToSession, findLiveSession, startSession, toSessionView } from "@/lib/server/booking-session";
 import { hashToken } from "@/lib/server/crypto";
@@ -48,6 +58,7 @@ async function verify(session: BookingSession, phone = IN, e164 = IN_E164) {
 }
 
 beforeEach(async () => {
+  jar.clear();
   await resetDb();
   clearOutbox();
   resetMockPhoneVerify();

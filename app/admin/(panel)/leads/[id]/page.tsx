@@ -6,6 +6,7 @@ import { fmtDateTime, whatsappUrl } from "@/lib/server/admin/format";
 import { db } from "@/lib/server/db";
 import { getSettings } from "@/lib/server/settings";
 import { ClientCode } from "../../../_components/ClientCode";
+import { PlanPanel } from "../../../_components/PlanPanel";
 import { QuotePanel } from "../../../_components/QuotePanel";
 import { StatusBadge } from "../../../_components/StatusBadge";
 
@@ -105,6 +106,7 @@ export default async function LeadDetailPage({ params }: PageProps<"/admin/leads
         </section>
       </div>
 
+      <PlanPanel leadId={lead.id} tz={tz} />
       <QuotePanel lead={lead} tz={tz} />
     </>
   );

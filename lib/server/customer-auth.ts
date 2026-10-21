@@ -6,9 +6,10 @@ import { cookies } from "next/headers";
 import type { Lead } from "@/generated/prisma/client";
 import type { AccountSummary } from "@/lib/shared/api";
 import { hashToken, randomToken } from "./crypto";
-import { db, type Tx } from "./db";
+import { db, TX_OPTIONS, type Tx } from "./db";
 import { env } from "./env";
 import { ApiException } from "./http";
+import { enqueueBookingEvent, kickNotifications } from "./notifications";
 import { logEvent } from "./observability";
 
 export const CUSTOMER_COOKIE = "css_customer";
@@ -151,7 +152,7 @@ export async function upsertAccount(
       ...(!existing.manychatSubscriberId && input.manychatSubscriberId
         ? { manychatSubscriberId: input.manychatSubscriberId }
         : {}),
-      // A nameless account never logged in, so its placeholder "CLIENT-" code was never shown: rename it.
+      // Accounts start nameless ("CLIENT-1234"); the first real name gives them a proper code.
       ...(!existing.clientCode || (nameToSet && existing.clientCode.startsWith("CLIENT-") && clientCodePrefix(nameToSet) !== "CLIENT")
         ? { clientCode: await freeClientCode(tx, existing.fullName?.trim() || fullName) }
         : {}),
@@ -159,6 +160,39 @@ export async function upsertAccount(
   });
 }
 
+/**
+ * Optional name + email, asked on /account after booking. A new email also gets the booking
+ * confirmation + reminders for the upcoming call (they were skipped while we had no address).
+ */
+export async function updateProfile(lead: Lead, input: { fullName?: string; email?: string }): Promise<Lead> {
+  const fullName = input.fullName?.trim() || null;
+  const email = input.email?.trim().toLowerCase() || null;
+  const emailChanged = email !== null && email !== lead.email;
+  const updated = await db.$transaction(async (tx) => {
+    let next = lead;
+    if (fullName && fullName !== lead.fullName) {
+      const renameCode = !lead.clientCode || (lead.clientCode.startsWith("CLIENT-") && clientCodePrefix(fullName) !== "CLIENT");
+      next = await tx.lead.update({
+        where: { id: lead.id },
+        data: { fullName, ...(renameCode ? { clientCode: await freeClientCode(tx, fullName) } : {}) },
+      });
+    }
+    if (emailChanged) {
+      next = await tx.lead.update({ where: { id: lead.id }, data: { email } });
+      const upcoming = await tx.booking.findFirst({
+        where: { leadId: lead.id, status: "CONFIRMED", startsAt: { gt: new Date() } },
+        orderBy: { startsAt: "asc" },
+        select: { id: true },
+      });
+      if (upcoming) await enqueueBookingEvent(tx, upcoming.id, "confirmed");
+    }
+    return next;
+  }, TX_OPTIONS);
+  if (emailChanged) kickNotifications();
+  logEvent("customer.profile_updated", { leadId: lead.id, name: Boolean(fullName), email: emailChanged });
+  return updated;
+}
+
 export function toAccountSummary(lead: Lead): AccountSummary {
-  return { clientCode: lead.clientCode ?? "", fullName: lead.fullName, phoneE164: lead.phoneE164 };
+  return { clientCode: lead.clientCode ?? "", fullName: lead.fullName, phoneE164: lead.phoneE164, email: lead.email };
 }

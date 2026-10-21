@@ -3,15 +3,16 @@
 import { parsePhoneNumberFromString } from "libphonenumber-js";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { BookingResponse, BookingSessionView, BookingView, SessionResponse, StartSessionRequest } from "@/lib/shared/api";
-import { createAccountSchema, maskPhone, trackingSchema } from "@/lib/shared/validation";
+import type { BookingResponse, BookingSessionView, SessionResponse, StartSessionRequest } from "@/lib/shared/api";
+import { maskPhone, trackingSchema } from "@/lib/shared/validation";
 import { ApiError, apiFetch } from "./api-client";
-import { canonicalZone, fmtDate, fmtTime, fmtZoneShort } from "./format";
-import { PhoneStep, type AuthMode } from "./PhoneStep";
+import { canonicalZone, fmtDate, fmtTime } from "./format";
+import { PhoneStep } from "./PhoneStep";
 import { Progress } from "./Progress";
 import { SlotPicker, type Slot } from "./SlotPicker";
 
-type Step = 1 | "name" | 2;
+/** docs/FLOW.md: ① mobile number + OTP → ② pick a time → booked, logged in, sent to /account. */
+type Step = 1 | 2;
 type Boot = { status: "loading" } | { status: "error"; message: string } | { status: "ready" };
 
 function detectTimeZone() {
@@ -55,8 +56,8 @@ export function BookingWizard() {
   const [step, setStep] = useState<Step>(1);
   const [expired, setExpired] = useState(false);
 
-  const [mode, setMode] = useState<AuthMode>(() => (searchParams.get("login") ? "login" : "signup"));
-  const [fullName, setFullName] = useState("");
+  const next = searchParams.get("next");
+  const accountNext = next && /^\/account(\/|$)/.test(next) ? next : null;
   const [country, setCountry] = useState("IN");
   const [phone, setPhone] = useState("");
   const [phoneNotice, setPhoneNotice] = useState<string | null>(null);
@@ -69,16 +70,15 @@ export function BookingWizard() {
   const headingRef = useRef<HTMLHeadingElement>(null);
   const firstRender = useRef(true);
 
-  /** Apply a fresh session snapshot: confirmation, returning visitor, name, or the right step. */
+  /** Apply a fresh session snapshot: logged-in people with a call (or a "next") go to their account. */
   const applySession = useCallback(
     (s: BookingSessionView, opts: { initial: boolean }) => {
       if (s.bookingReference) {
-        router.replace("/booking/confirmation");
+        router.replace("/account?booked=1");
         return;
       }
-      const next = searchParams.get("next");
-      if (s.account && next && /^\/account(\/|$)/.test(next)) {
-        router.replace(next);
+      if (s.account && (accountNext || s.upcomingBooking)) {
+        router.replace(accountNext ?? "/account");
         return;
       }
       setSession(s);
@@ -90,9 +90,9 @@ export function BookingWizard() {
           setPhone(parsed.formatNational());
         }
       }
-      setStep(!s.phoneVerified ? 1 : s.account ? 2 : "name");
+      setStep(s.phoneVerified ? 2 : 1);
     },
-    [router, searchParams],
+    [router, accountNext],
   );
 
   useEffect(() => {
@@ -186,26 +186,14 @@ export function BookingWizard() {
   }
 
   const callMinutes = session?.callMinutes ?? 30;
-  const upcoming = session?.phoneVerified ? session.upcomingBooking : null;
-
-  if (upcoming) {
-    return (
-      <div className="wizard-card">
-        <UpcomingBooking booking={upcoming} headingRef={headingRef} />
-      </div>
-    );
-  }
 
   return (
     <div className="wizard-card">
-      <Progress step={step === 2 ? 2 : 1} />
+      <Progress step={step} />
 
       {step === 1 && (
         <PhoneStep
-          mode={mode}
-          onModeChange={setMode}
-          fullName={fullName}
-          onFullNameChange={setFullName}
+          loggingIn={Boolean(accountNext)}
           country={country}
           phone={phone}
           onCountryChange={setCountry}
@@ -214,20 +202,11 @@ export function BookingWizard() {
           headingRef={headingRef}
           notice={phoneNotice}
           onSessionExpired={() => setExpired(true)}
-          onContinueVerified={() => setStep(session?.account ? 2 : "name")}
+          onContinueVerified={() => setStep(2)}
           onVerified={({ session: s }) => {
             setPhoneNotice(null);
             applySession(s, { initial: false });
           }}
-        />
-      )}
-
-      {step === "name" && (
-        <NameStep
-          headingRef={headingRef}
-          initial={fullName}
-          onDone={(s) => applySession(s, { initial: false })}
-          onSessionExpired={() => setExpired(true)}
         />
       )}
 
@@ -245,7 +224,7 @@ export function BookingWizard() {
           }}
           slotsReload={slotsReload}
           notice={slotNotice}
-          onBooked={() => router.replace("/booking/confirmation")}
+          onBooked={() => router.replace("/account?booked=1")}
           onSlotGone={() => {
             setSlot(null);
             setSlotNotice("That time was just taken by someone else. Please pick another. The times below are up to date.");
@@ -260,87 +239,6 @@ export function BookingWizard() {
         />
       )}
     </div>
-  );
-}
-
-// ---------------------------------------------------------------- name (only when a "log in" number had no account)
-
-function NameStep({
-  headingRef,
-  initial,
-  onDone,
-  onSessionExpired,
-}: {
-  headingRef: React.RefObject<HTMLHeadingElement | null>;
-  initial: string;
-  onDone: (s: BookingSessionView) => void;
-  onSessionExpired: () => void;
-}) {
-  const [name, setName] = useState(initial);
-  const [error, setError] = useState<string | null>(null);
-  const [pending, setPending] = useState(false);
-  const inputRef = useRef<HTMLInputElement>(null);
-
-  async function save() {
-    const parsed = createAccountSchema.safeParse({ fullName: name });
-    if (!parsed.success) {
-      setError(parsed.error.issues[0]?.message ?? "Enter your name.");
-      inputRef.current?.focus();
-      return;
-    }
-    setPending(true);
-    setError(null);
-    try {
-      const { session } = await apiFetch<SessionResponse>("/api/booking/account", { method: "POST", body: parsed.data });
-      onDone(session);
-    } catch (err) {
-      if (err instanceof ApiError && err.code === "SESSION_EXPIRED") return onSessionExpired();
-      setError(err instanceof ApiError ? err.message : "Something went wrong. Please try again.");
-      setPending(false);
-    }
-  }
-
-  return (
-    <section className="step" aria-labelledby="step-title">
-      <h2 id="step-title" ref={headingRef} tabIndex={-1}>
-        One last thing: your name
-      </h2>
-      <p className="step-lede">Your number is verified. Tell us your name so our team knows who they&apos;re calling.</p>
-      <form
-        noValidate
-        onSubmit={(e) => {
-          e.preventDefault();
-          void save();
-        }}
-      >
-        <div className={`field${error ? " has-error" : ""}`}>
-          <label htmlFor="acct-name">Your name</label>
-          <input
-            ref={inputRef}
-            id="acct-name"
-            type="text"
-            autoComplete="name"
-            autoCapitalize="words"
-            placeholder="Rahul Sharma"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            aria-invalid={error ? true : undefined}
-            aria-describedby={error ? "acct-name-error" : undefined}
-            maxLength={80}
-          />
-          {error && (
-            <p id="acct-name-error" className="field-error" role="alert">
-              {error}
-            </p>
-          )}
-        </div>
-        <div className="step-actions">
-          <button type="submit" className="btn btn-primary btn-lg btn-block" disabled={pending} aria-busy={pending}>
-            {pending ? "Creating your account…" : "Continue"}
-          </button>
-        </div>
-      </form>
-    </section>
   );
 }
 
@@ -417,7 +315,7 @@ function TimeStep({
         </p>
       )}
       <h2 id="step-title" ref={headingRef} tabIndex={-1}>
-        Book a time. Our sales team will contact you.
+        Pick a time for your call
       </h2>
       <p className="step-lede">
         A {p.callMinutes}-minute call to {p.session.phoneE164 ? maskPhone(p.session.phoneE164) : "your verified number"}.
@@ -476,43 +374,5 @@ function WizardSkeleton() {
       <span className="skeleton" style={{ height: 52 }} />
       <span className="skeleton" style={{ height: 54 }} />
     </div>
-  );
-}
-
-// ---------------------------------------------------------------- returning visitor
-
-function UpcomingBooking({
-  booking,
-  headingRef,
-}: {
-  booking: BookingView;
-  headingRef: React.RefObject<HTMLHeadingElement | null>;
-}) {
-  const tz = booking.customerTimeZone;
-  return (
-    <section className="step" aria-labelledby="step-title">
-      <h2 id="step-title" ref={headingRef} tabIndex={-1}>
-        You already have a call booked.
-      </h2>
-      <p className="confirm-lede">
-        Our sales team will call you on <strong>{maskPhone(booking.phoneE164)}</strong> at{" "}
-        <strong>
-          {fmtTime(booking.start, tz)} {fmtZoneShort(booking.start, tz)}
-        </strong>{" "}
-        on {fmtDate(booking.start, tz)}.
-      </p>
-      {booking.manageUrl ? (
-        <div className="step-actions">
-          <a className="btn btn-primary btn-lg" href={booking.manageUrl}>
-            Reschedule
-          </a>
-          <a className="btn btn-danger btn-lg" href={booking.manageUrl}>
-            Cancel call
-          </a>
-        </div>
-      ) : (
-        <p className="notice">It&apos;s too close to the call to change it online. If something comes up, DM us on Instagram.</p>
-      )}
-    </section>
   );
 }

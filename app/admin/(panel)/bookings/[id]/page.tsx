@@ -10,6 +10,7 @@ import { getAvailableSlots, type Slot } from "@/lib/server/scheduling/availabili
 import { getSettings } from "@/lib/server/settings";
 import { ActionForm } from "../../../_components/ActionForm";
 import { ClientCode } from "../../../_components/ClientCode";
+import { PlanPanel } from "../../../_components/PlanPanel";
 import { QuotePanel } from "../../../_components/QuotePanel";
 import { StatusBadge } from "../../../_components/StatusBadge";
 import {
@@ -171,6 +172,7 @@ export default async function BookingDetailPage({ params }: PageProps<"/admin/bo
         </section>
       </div>
 
+      <PlanPanel leadId={lead.id} tz={tz} />
       <QuotePanel
         lead={lead}
         booking={{ id: booking.id, convertedAt: booking.convertedAt, status: booking.status }}

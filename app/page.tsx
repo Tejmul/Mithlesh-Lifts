@@ -2,7 +2,7 @@ import Image from "next/image";
 import Link from "next/link";
 import type { CSSProperties } from "react";
 import { CallCta } from "@/components/site/CallCta";
-import { ResultCard } from "@/components/site/ResultCard";
+import { ResultsCarousel } from "@/components/site/ResultsCarousel";
 import { SiteShell } from "@/components/site/SiteShell";
 import { TransformationScroll } from "@/components/site/TransformationScroll";
 import { DEFAULT_CALL_MINUTES, results } from "@/lib/site";
@@ -27,7 +27,6 @@ const callSteps = [
 const d = (n: number) => ({ "--d": n }) as CSSProperties;
 
 export default function Home() {
-  const teaser = results.slice(0, 2);
   return (
     <SiteShell current="home">
       {/* ---------------------------------------------------------------- hero */}
@@ -91,13 +90,13 @@ export default function Home() {
               See all results <span aria-hidden="true">→</span>
             </Link>
           </div>
-          <div className="results-grid results-grid-2">
-            {teaser.map((r, i) => (
-              <div key={r.name} data-reveal data-reveal-delay={i + 1}>
-                <ResultCard r={r} sizes="(max-width: 640px) 100vw, 50vw" />
-              </div>
-            ))}
+          <div data-reveal>
+            <ResultsCarousel items={results} />
           </div>
+          <p className="rc-note">
+            A few of our 150+ transformations, shared with each client&apos;s permission. Many prefer to keep their
+            photos private.
+          </p>
         </div>
       </section>
 

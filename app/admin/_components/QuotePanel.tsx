@@ -3,7 +3,8 @@ import { fmtDateTime } from "@/lib/server/admin/format";
 import { formatInr, latestQuote, leadDisplayName, QUOTE_STATUS_LABEL } from "@/lib/server/admin/quote-summary";
 import { reportError } from "@/lib/server/observability";
 import { listQuotesForLead } from "@/lib/server/quotes";
-import { cancelQuoteAction, sendQuoteAction } from "../(panel)/quote-actions";
+import { durationLabel } from "@/lib/server/memberships";
+import { cancelQuoteAction, recordPaymentAction, sendQuoteAction } from "../(panel)/quote-actions";
 import { ActionForm } from "./ActionForm";
 
 const BADGE_CLASS: Record<Quote["status"], string> = {
@@ -47,7 +48,8 @@ export async function QuotePanel({ lead, booking, tz }: Props) {
       )}
 
       <p className="adm-muted adm-small">
-        Sends to {leadDisplayName(lead)}. It appears in their in-app notifications and they pay online.
+        Sends to {leadDisplayName(lead)} only. It appears in their notifications and they pay online. Paid by UPI or
+        cash instead? Use &ldquo;Mark paid&rdquo; and the plan starts the same way.
       </p>
       <ActionForm action={sendQuoteAction} submitLabel="Send quote" pendingLabel="Sending…" className="adm-quote-form">
         <input type="hidden" name="leadId" value={lead.id} />
@@ -69,6 +71,27 @@ export async function QuotePanel({ lead, booking, tz }: Props) {
             placeholder="12000"
           />
         </label>
+        <div className="adm-field">
+          <span id="plan-length-label">Plan length</span>
+          <div className="adm-duration" role="group" aria-labelledby="plan-length-label">
+            <input
+              name="durationCount"
+              type="number"
+              inputMode="numeric"
+              min={1}
+              max={1000}
+              step={1}
+              required
+              defaultValue={3}
+              aria-label="Plan length"
+            />
+            <select name="durationUnit" defaultValue="MONTH" aria-label="Unit">
+              <option value="DAY">days</option>
+              <option value="WEEK">weeks</option>
+              <option value="MONTH">months</option>
+            </select>
+          </div>
+        </div>
         <label className="adm-field adm-field-wide">
           <span>Note for the client (optional)</span>
           <textarea name="note" rows={2} maxLength={1000} placeholder="Includes weekly check-ins and a custom meal plan." />
@@ -89,19 +112,37 @@ export async function QuotePanel({ lead, booking, tz }: Props) {
                   {formatInr(q.amountInr)} <QuoteBadge status={q.status} />
                 </p>
                 <p className="adm-small">
-                  {q.planName} · <span className="adm-mono">{q.reference}</span>
+                  {q.planName}
+                  {q.durationCount && q.durationUnit ? ` · ${durationLabel(q.durationCount, q.durationUnit)}` : ""} ·{" "}
+                  <span className="adm-mono">{q.reference}</span>
                 </p>
                 {q.note && <p className="adm-small adm-muted">{q.note}</p>}
                 <p className="adm-small adm-muted">
                   Sent {fmtDateTime(q.createdAt, tz)}
-                  {q.paidAt && <span className="adm-quote-status-paid"> · Paid {fmtDateTime(q.paidAt, tz)}</span>}
+                  {q.paidAt && (
+                    <span className="adm-quote-status-paid">
+                      {" "}
+                      · Paid {fmtDateTime(q.paidAt, tz)} · <a href="#plan">see plan dates</a>
+                    </span>
+                  )}
                   {q.cancelledAt && ` · Cancelled ${fmtDateTime(q.cancelledAt, tz)}`}
                 </p>
               </div>
               {q.status === "SENT" && (
-                <ActionForm action={cancelQuoteAction} submitLabel="Cancel quote" pendingLabel="Cancelling…" variant="danger">
-                  <input type="hidden" name="quoteId" value={q.id} />
-                </ActionForm>
+                <div className="adm-quote-actions">
+                  <ActionForm
+                    action={recordPaymentAction}
+                    submitLabel="Mark paid (UPI / cash)"
+                    pendingLabel="Saving…"
+                    variant="secondary"
+                    confirm={`Mark ${formatInr(q.amountInr)} as received for ${q.planName}? This starts the plan.`}
+                  >
+                    <input type="hidden" name="quoteId" value={q.id} />
+                  </ActionForm>
+                  <ActionForm action={cancelQuoteAction} submitLabel="Cancel quote" pendingLabel="Cancelling…" variant="danger">
+                    <input type="hidden" name="quoteId" value={q.id} />
+                  </ActionForm>
+                </div>
               )}
             </li>
           ))}

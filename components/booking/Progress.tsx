@@ -1,4 +1,4 @@
-const LABELS = ["Your account", "Pick a time"];
+const LABELS = ["Your number", "Pick a time"];
 
 /** Booking progress: the same gold→ember rail as the stage strip. */
 export function Progress({ step }: { step: number }) {

@@ -28,18 +28,11 @@ export const fullNameSchema = z
   .min(2, "Enter your name.")
   .max(80, "Keep your name under 80 characters.");
 
-/** Step 1 — name (signup) + phone. */
+/** Step 1 — mobile number only. One path for new and returning people (docs/FLOW.md). */
 export const sendCodeSchema = z
   .object({
     country: z.string().length(2, "Choose your country code."),
     phone: z.string().trim().min(4, "Enter your mobile number.").max(20, "That number is too long."),
-    fullName: fullNameSchema.optional(),
-    mode: z.enum(["signup", "login"]).optional().default("signup"),
-  })
-  .superRefine((v, ctx) => {
-    if (v.mode === "signup" && !v.fullName) {
-      ctx.addIssue({ code: "custom", path: ["fullName"], message: "Enter your name." });
-    }
   })
   .superRefine((v, ctx) => {
     if (!normalizePhone(v.country, v.phone)) {
@@ -51,12 +44,18 @@ export const verifyCodeSchema = z.object({
   code: z.string().trim().regex(/^\d{4,8}$/, "Enter the code from the SMS."),
 });
 
-export const createAccountSchema = z.object({ fullName: fullNameSchema });
+/** /account → optional name + email, asked after booking. Empty strings clear nothing. */
+export const profileSchema = z.object({
+  fullName: z.union([fullNameSchema, z.literal("").transform(() => undefined)]).optional(),
+  email: z.union([emailSchema, z.literal("").transform(() => undefined)]).optional(),
+});
 
 /** Admin → send a quote to a client. */
 export const quoteSchema = z.object({
   planName: z.string().trim().min(2, "Enter the plan name.").max(80),
   amountInr: z.coerce.number().int("Whole rupees only.").min(1, "Enter an amount.").max(10_000_000),
+  durationCount: z.coerce.number().int("Whole numbers only.").min(1, "Enter the plan length.").max(1000),
+  durationUnit: z.enum(["DAY", "WEEK", "MONTH"], "Choose days, weeks or months."),
   note: z.string().trim().max(1000).optional(),
 });
 

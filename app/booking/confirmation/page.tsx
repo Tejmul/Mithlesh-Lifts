@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import { redirect } from "next/navigation";
 import { Suspense } from "react";
 import { BookingSummary } from "@/components/booking/BookingSummary";
 import { fmtDate, fmtTime, fmtZoneShort, googleCalendarUrl } from "@/components/booking/format";
@@ -7,6 +8,7 @@ import { maskPhone } from "@/lib/shared/validation";
 import { SiteShell } from "@/components/site/SiteShell";
 import { getSessionFromCookies } from "@/lib/server/booking-session";
 import { toBookingView } from "@/lib/server/bookings/service";
+import { getCurrentCustomer } from "@/lib/server/customer-auth";
 import { db } from "@/lib/server/db";
 
 export const metadata: Metadata = {
@@ -41,6 +43,8 @@ function ConfirmationSkeleton() {
 }
 
 async function Confirmation() {
+  // Booking logs the customer in; their account page is the confirmation (docs/FLOW.md ③).
+  if (await getCurrentCustomer()) redirect("/account?booked=1");
   const session = await getSessionFromCookies();
   const record = session?.bookingId
     ? await db.booking.findUnique({ where: { id: session.bookingId }, include: { lead: true } })

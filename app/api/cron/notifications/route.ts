@@ -8,7 +8,7 @@ import { pruneRateLimits } from "@/lib/server/rate-limit";
 
 export const maxDuration = 60;
 
-/** Vercel Cron (GET, Authorization: Bearer CRON_SECRET): send due emails + housekeeping. */
+/** Scheduler (GET, Authorization: Bearer CRON_SECRET), e.g. cron-job.org every 5 min: send due emails + housekeeping. */
 export const GET = handler(async (request: Request) => {
   await connection(); // always request-time, never prerendered
   const secret = env().CRON_SECRET;

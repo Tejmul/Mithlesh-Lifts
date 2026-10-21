@@ -6,6 +6,7 @@ import { resetEnvCache } from "@/lib/server/env";
 import { ApiException } from "@/lib/server/http";
 import { listInbox } from "@/lib/server/inbox";
 import { createCheckout, handleRazorpayWebhook, paymentsEnabled, verifyRazorpayPayment } from "@/lib/server/payments";
+import { membershipStatus, recordManualPayment, updateMembership } from "@/lib/server/memberships";
 import { cancelQuote, createQuote, getQuoteForLead, listQuotesForLead, toQuoteView } from "@/lib/server/quotes";
 import { resetDb } from "../helpers/db";
 
@@ -38,7 +39,15 @@ function enablePayments() {
 }
 
 const newQuote = (leadId = leadA.id, amountInr = 14999) =>
-  createQuote({ leadId, planName: "Strength 12 weeks", amountInr, note: " Includes diet plan ", adminUserId: "admin_1" });
+  createQuote({
+    leadId,
+    planName: "Strength coaching",
+    amountInr,
+    durationCount: 12,
+    durationUnit: "WEEK",
+    note: " Includes diet plan ",
+    adminUserId: "admin_1",
+  });
 
 beforeEach(async () => {
   await resetDb();
@@ -73,7 +82,7 @@ describe("quotes", () => {
     expect(inbox.items[0]).toMatchObject({
       kind: "quote_sent",
       title: "Your plan quote is ready",
-      body: "Strength 12 weeks · ₹14,999",
+      body: "Strength coaching · 12 weeks · ₹14,999",
       href: `/account/quotes/${quote.id}`,
       read: false,
     });
@@ -82,7 +91,7 @@ describe("quotes", () => {
 
   it("formats lakh amounts in Indian style", async () => {
     await newQuote(leadA.id, 125000);
-    expect((await listInbox(leadA.id)).items[0]!.body).toBe("Strength 12 weeks · ₹1,25,000");
+    expect((await listInbox(leadA.id)).items[0]!.body).toBe("Strength coaching · 12 weeks · ₹1,25,000");
   });
 
   it("rejects quotes for unknown leads", async () => {
@@ -132,7 +141,7 @@ describe("razorpay checkout + verification", () => {
       amountPaise: 1_499_900,
       currency: "INR",
       name: "mithilesh_lifts",
-      description: "Strength 12 weeks",
+      description: "Strength coaching",
       prefill: { name: "Rahul Sharma", contact: "+919876543210" },
     });
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -243,7 +252,7 @@ describe("razorpay checkout + verification", () => {
     expect(paidItems).toHaveLength(1);
     expect(paidItems[0]).toMatchObject({
       title: "Payment received",
-      body: "₹14,999 for Strength 12 weeks. Welcome aboard!",
+      body: expect.stringMatching(/^₹14,999 for Strength coaching\. Your plan runs until \d{1,2} [A-Z][a-z]{2} \d{4}\. Welcome aboard!$/),
       href: `/account/quotes/${quote.id}`,
     });
 
@@ -326,5 +335,54 @@ describe("razorpay webhook", () => {
     expect((await db.payment.findFirstOrThrow({ where: { quoteId: quote.id } })).status).toBe("PAID");
     expect((await listInbox(leadA.id)).items.filter((i) => i.kind === "payment_received")).toHaveLength(0);
     vi.mocked(console.error).mockRestore();
+  });
+});
+
+describe("memberships (paid plans)", () => {
+  const DAY = 86_400_000;
+
+  it("an online payment starts the plan for the quoted length", async () => {
+    enablePayments();
+    const quote = await newQuote();
+    const { orderId } = await createCheckout({ quoteId: quote.id, leadId: leadA.id });
+    await verifyRazorpayPayment({
+      leadId: leadA.id,
+      quoteId: quote.id,
+      orderId,
+      paymentId: "pay_m1",
+      signature: sign(`${orderId}|pay_m1`, KEY_SECRET),
+    });
+    const m = await db.membership.findUniqueOrThrow({ where: { quoteId: quote.id } });
+    expect(m).toMatchObject({ leadId: leadA.id, planName: "Strength coaching", amountInr: 14999, paidVia: "razorpay" });
+    expect(m.validUntil.getTime() - m.validFrom.getTime()).toBe(84 * DAY);
+    expect(membershipStatus(m)).toBe("active");
+  });
+
+  it("admin can record a UPI/cash payment once; a renewal starts when the current plan ends", async () => {
+    const first = await recordManualPayment({ quoteId: (await newQuote()).id });
+    expect(first.paidVia).toBe("manual");
+    expect((await listInbox(leadA.id)).items[0]).toMatchObject({ kind: "payment_received" });
+    expect((await db.quote.findUniqueOrThrow({ where: { id: first.quoteId } })).status).toBe("PAID");
+    await expectApiError(recordManualPayment({ quoteId: first.quoteId }), 409, "BAD_REQUEST");
+
+    const renewal = await recordManualPayment({ quoteId: (await newQuote()).id });
+    expect(renewal.validFrom.getTime()).toBe(first.validUntil.getTime());
+    expect(membershipStatus(renewal)).toBe("upcoming");
+
+    const cancelled = await newQuote();
+    await cancelQuote({ quoteId: cancelled.id, adminUserId: "admin_1" });
+    await expectApiError(recordManualPayment({ quoteId: cancelled.id }), 409, "BAD_REQUEST");
+    expect(await db.membership.count()).toBe(2);
+  });
+
+  it("admin can move the dates; the end must be after the start", async () => {
+    const m = await recordManualPayment({ quoteId: (await newQuote()).id });
+    const from = new Date(Date.now() - 30 * DAY);
+    const soon = new Date(Date.now() + 3 * DAY);
+    const moved = await updateMembership({ id: m.id, validFrom: from, validUntil: soon, notes: " Extended: travel " });
+    expect(moved).toMatchObject({ validFrom: from, validUntil: soon, notes: "Extended: travel" });
+    expect(membershipStatus(moved)).toBe("expiring");
+    expect(membershipStatus({ validFrom: from, validUntil: new Date(Date.now() - 1000) })).toBe("expired");
+    await expectApiError(updateMembership({ id: m.id, validFrom: soon, validUntil: from }), 422, "VALIDATION");
   });
 });

@@ -5,9 +5,9 @@ import type { CheckoutResponse, QuoteView } from "@/lib/shared/api";
 import { db, TX_OPTIONS } from "../db";
 import { env } from "../env";
 import { ApiException } from "../http";
-import { addInboxItem } from "../inbox";
+import { completeQuotePayment } from "../memberships";
 import { logEvent, reportError } from "../observability";
-import { formatInr, getQuoteForLead, toQuoteView } from "../quotes";
+import { getQuoteForLead, toQuoteView } from "../quotes";
 import { createRazorpayOrder, verifyCheckoutSignature, verifyWebhookSignature } from "./razorpay";
 
 const BRAND = "mithilesh_lifts";
@@ -85,8 +85,8 @@ export async function createCheckout(input: { quoteId: string; leadId: string })
 }
 
 /**
- * Idempotent: marks the Payment PAID and its Quote PAID (only from SENT) and adds the
- * "payment_received" inbox item exactly once, even if checkout verify and webhook race.
+ * Idempotent: marks the Payment PAID and its Quote PAID (only from SENT), starts the membership and
+ * adds the "payment_received" inbox item exactly once, even if checkout verify and webhook race.
  */
 async function markPaymentPaid(paymentId: string, providerPaymentId: string): Promise<void> {
   const outcome = await db.$transaction(async (tx) => {
@@ -98,20 +98,12 @@ async function markPaymentPaid(paymentId: string, providerPaymentId: string): Pr
         data: { status: "PAID", providerPaymentId, paidAt: now },
       });
     }
-    const res = await tx.quote.updateMany({
-      where: { id: payment.quoteId, status: "SENT" },
-      data: { status: "PAID", paidAt: now },
+    const started = await completeQuotePayment(tx, payment.quote, {
+      amountInr: payment.amountInr,
+      paidVia: "razorpay",
+      paidAt: now,
     });
-    if (res.count === 1) {
-      await addInboxItem(tx, {
-        leadId: payment.quote.leadId,
-        kind: "payment_received",
-        title: "Payment received",
-        body: `${formatInr(payment.amountInr)} for ${payment.quote.planName}. Welcome aboard!`,
-        quoteId: payment.quoteId,
-      });
-      return "paid" as const;
-    }
+    if (started) return "paid" as const;
     const current = await tx.quote.findUniqueOrThrow({ where: { id: payment.quoteId }, select: { status: true } });
     return current.status === "PAID" ? ("already_paid" as const) : ("inactive_quote" as const);
   }, TX_OPTIONS);

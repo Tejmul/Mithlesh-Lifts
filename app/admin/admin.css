@@ -894,3 +894,60 @@ body:has(.adm) {
 .adm-quote-main p {
   margin: 0;
 }
+
+/* ---------- plan length + memberships ---------- */
+.adm-duration {
+  display: grid;
+  grid-template-columns: minmax(64px, 90px) minmax(0, 1fr);
+  gap: 6px;
+}
+.adm-quote-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.adm-badge-active {
+  color: var(--a-green);
+}
+.adm-badge-expiring {
+  color: var(--a-gold);
+}
+.adm-badge-expired {
+  color: var(--a-red);
+}
+.adm-badge-upcoming {
+  color: var(--a-blue);
+}
+.adm-plan-form {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 170px), 1fr));
+  align-items: end;
+}
+.adm-plan-form .adm-field-wide,
+.adm-plan-form .adm-field-errors,
+.adm-plan-form .adm-form-actions {
+  grid-column: 1 / -1;
+}
+.adm-plans {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 12px;
+}
+.adm-plan {
+  padding: 12px;
+  border: 1px solid var(--a-border);
+  border-radius: var(--a-radius);
+  background: var(--a-panel-2);
+  display: grid;
+  gap: 10px;
+}
+.adm-plan-head {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 4px 12px;
+}
+.adm-plan-head p {
+  margin: 0;
+}

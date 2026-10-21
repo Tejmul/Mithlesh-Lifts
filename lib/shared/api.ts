@@ -44,7 +44,7 @@ export type BookingSessionView = {
   account: AccountSummary | null;
 };
 
-export type AccountSummary = { clientCode: string; fullName: string | null; phoneE164: string };
+export type AccountSummary = { clientCode: string; fullName: string | null; phoneE164: string; email: string | null };
 export type SessionResponse = { session: BookingSessionView };
 
 /**
@@ -55,23 +55,18 @@ export type StartSessionRequest = { source?: string; campaign?: string; mc?: str
 
 /**
  * POST /api/booking/phone/send — step 1. 429 RATE_LIMITED / OTP_COOLDOWN, 502 OTP_SEND_FAILED.
- * mode "signup" (name + phone) or "login" (phone only). The server never reveals whether an
- * account exists before the OTP is verified.
+ * Mobile number only: the same path for new and returning people. The server never reveals
+ * whether an account exists before the OTP is verified.
  */
-export type SendCodeRequest = { country: string; phone: string; fullName?: string; mode?: "signup" | "login" };
+export type SendCodeRequest = { country: string; phone: string };
 export type SendCodeResponse = { sentTo: string; resendAvailableAt: string };
 
 /**
  * POST /api/booking/phone/verify → SessionResponse. 400 OTP_INVALID.
- * On success the phone is verified. If an account exists (or a name was given at signup) the
- * account is created/loaded, session.account is set and the customer cookie is issued.
- * If this number has no account and no name is known, session.phoneVerified = true but
- * session.account = null → the UI asks for the name and calls POST /api/booking/account.
+ * On success the phone is verified, the account is created or loaded (session.account is set)
+ * and the customer cookie is issued. Name and email are asked later, on /account.
  */
 export type VerifyCodeRequest = { code: string };
-
-/** POST /api/booking/account { fullName } — finish creating the account after verification → SessionResponse. 403 PHONE_NOT_VERIFIED. */
-export type CreateAccountRequest = { fullName: string };
 
 /** PUT /api/booking/contact — optional (not used by the current flow) → SessionResponse. */
 export type SaveContactRequest = { fullName: string; email: string; marketingConsent?: boolean };
@@ -116,11 +111,24 @@ export type RescheduleBookingRequest = { token: string; start: string; timeZone:
 
 // ---------------------------------------------------------------- customer account (cookie: css_customer)
 
+/** PUT /api/account/profile — optional name + email after booking → AccountResponse. */
+export type ProfileRequest = { fullName?: string; email?: string };
+
 /** GET /api/account → 401 UNAUTHORIZED when logged out. */
 export type AccountResponse = {
   account: AccountSummary;
   upcomingBooking: BookingView | null;
   unreadCount: number;
+  /** Current (or next, or most recent) paid plan. */
+  plan: PlanView | null;
+};
+
+export type PlanView = {
+  planName: string;
+  amountInr: number;
+  validFrom: string;
+  validUntil: string;
+  status: "upcoming" | "active" | "expiring" | "expired";
 };
 
 export type InboxItemView = {
@@ -143,6 +151,8 @@ export type QuoteView = {
   reference: string;
   planName: string;
   amountInr: number;
+  /** "3 months"; null on quotes sent before plan lengths existed. */
+  duration: string | null;
   note: string | null;
   status: "SENT" | "PAID" | "CANCELLED";
   createdAt: string;

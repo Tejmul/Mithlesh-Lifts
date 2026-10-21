@@ -1,11 +1,12 @@
 import "server-only";
 // Quotes the sales team sends a client after the call. Customers see them in their inbox and pay online.
 import { randomInt } from "crypto";
-import type { Quote } from "@/generated/prisma/client";
+import type { PlanUnit, Quote } from "@/generated/prisma/client";
 import type { QuoteView } from "@/lib/shared/api";
 import { db, TX_OPTIONS, type Tx } from "./db";
 import { ApiException } from "./http";
 import { addInboxItem } from "./inbox";
+import { durationLabel } from "./memberships";
 import { paymentsEnabled } from "./payments";
 
 const REFERENCE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -33,6 +34,8 @@ export async function createQuote(input: {
   bookingId?: string;
   planName: string;
   amountInr: number;
+  durationCount: number;
+  durationUnit: PlanUnit;
   note?: string;
   adminUserId: string;
 }): Promise<Quote> {
@@ -50,6 +53,8 @@ export async function createQuote(input: {
         bookingId: input.bookingId ?? null,
         planName,
         amountInr: input.amountInr,
+        durationCount: input.durationCount,
+        durationUnit: input.durationUnit,
         note: input.note?.trim() || null,
         createdByAdminId: input.adminUserId,
       },
@@ -58,7 +63,7 @@ export async function createQuote(input: {
       leadId: lead.id,
       kind: "quote_sent",
       title: "Your plan quote is ready",
-      body: `${planName} · ${formatInr(input.amountInr)}`,
+      body: [planName, durationLabel(input.durationCount, input.durationUnit), formatInr(input.amountInr)].filter(Boolean).join(" · "),
       quoteId: quote.id,
     });
     return quote;
@@ -100,6 +105,7 @@ export function toQuoteView(q: Quote): QuoteView {
     reference: q.reference,
     planName: q.planName,
     amountInr: q.amountInr,
+    duration: durationLabel(q.durationCount, q.durationUnit),
     note: q.note,
     status: q.status,
     createdAt: q.createdAt.toISOString(),
