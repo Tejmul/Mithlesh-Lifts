@@ -21,12 +21,16 @@ let seq = 0;
 async function createBooking(opts: { startsInHours?: number; email?: string } = {}) {
   seq++;
   const startsAt = new Date(Date.now() + (opts.startsInHours ?? 48) * HOUR + seq * 2 * HOUR);
-  const lead = await db.lead.create({
-    data: {
+  const email = opts.email ?? "asha@example.com";
+  // The email is the account (unique): several bookings in one test share the lead.
+  const lead = await db.lead.upsert({
+    where: { email },
+    update: {},
+    create: {
       fullName: "Asha Rao",
       phoneE164: `+91987654${String(1000 + seq).slice(-4)}`,
-      phoneVerifiedAt: new Date(),
-      email: opts.email ?? "asha@example.com",
+      emailVerifiedAt: new Date(),
+      email,
       source: "manychat",
       campaign: "fit_reel",
     },
@@ -267,5 +271,18 @@ describe("processDueNotifications", () => {
 describe("kickNotifications", () => {
   it("does not throw outside a request context", () => {
     expect(() => kickNotifications()).not.toThrow();
+  });
+});
+
+describe("reminder wording", () => {
+  it("uses the time actually left when a reminder goes out late", async () => {
+    const { reminderOffsetNow } = await import("@/lib/server/notifications/worker");
+    const now = new Date("2030-01-01T10:00:00Z");
+    const at = (minutes: number) => new Date(now.getTime() + minutes * 60_000);
+    expect(reminderOffsetNow(1440, at(1440), now)).toBe(1440); // on time
+    expect(reminderOffsetNow(1440, at(1435), now)).toBe(1440); // a few minutes late: same wording
+    expect(reminderOffsetNow(1440, at(185), now)).toBe(180); // delayed: "in 3 hours"
+    expect(reminderOffsetNow(60, at(58), now)).toBe(60);
+    expect(reminderOffsetNow(60, at(22), now)).toBe(20);
   });
 });

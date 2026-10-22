@@ -18,13 +18,13 @@ export type UnbookedLead = {
 };
 
 /**
- * People who verified their phone but never booked: BookingSession rows with phoneVerifiedAt and no booking,
+ * People who confirmed their email but never booked: BookingSession rows with emailVerifiedAt and no booking,
  * de-duplicated by phone, excluding anyone with a booking made after their latest verification.
  */
 export async function getVerifiedUnbooked(days: number, now = new Date()): Promise<UnbookedLead[]> {
   const sessions = await db.bookingSession.findMany({
-    where: { phoneVerifiedAt: { gte: new Date(now.getTime() - days * DAY) }, bookingId: null, phoneE164: { not: null } },
-    orderBy: { phoneVerifiedAt: "desc" },
+    where: { emailVerifiedAt: { gte: new Date(now.getTime() - days * DAY) }, bookingId: null, phoneE164: { not: null } },
+    orderBy: { emailVerifiedAt: "desc" },
     take: 1000,
   });
   const byPhone = new Map<string, UnbookedLead>();
@@ -40,7 +40,7 @@ export async function getVerifiedUnbooked(days: number, now = new Date()): Promi
         email: s.email,
         source: s.source,
         campaign: s.campaign,
-        verifiedAt: s.phoneVerifiedAt!,
+        verifiedAt: s.emailVerifiedAt!,
         attempts: 1,
       });
     } else {

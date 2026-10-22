@@ -1,4 +1,5 @@
 import { createHmac } from "crypto";
+import { DateTime } from "luxon";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Lead } from "@/generated/prisma/client";
 import { db } from "@/lib/server/db";
@@ -29,6 +30,7 @@ async function expectApiError(p: Promise<unknown>, status: number, code: string)
   expect(err).toBeInstanceOf(ApiException);
   expect((err as ApiException).status).toBe(status);
   expect((err as ApiException).code).toBe(code);
+  return err as ApiException;
 }
 
 function enablePayments() {
@@ -354,8 +356,39 @@ describe("memberships (paid plans)", () => {
     });
     const m = await db.membership.findUniqueOrThrow({ where: { quoteId: quote.id } });
     expect(m).toMatchObject({ leadId: leadA.id, planName: "Strength coaching", amountInr: 14999, paidVia: "razorpay" });
-    expect(m.validUntil.getTime() - m.validFrom.getTime()).toBe(84 * DAY);
+    // 12 weeks, through the end of the last day (coach's time zone).
+    const expected = DateTime.fromJSDate(m.validFrom, { zone: "Asia/Kolkata" }).plus({ weeks: 12 }).minus({ days: 1 }).endOf("day");
+    expect(m.validUntil.getTime()).toBe(expected.toMillis());
     expect(membershipStatus(m)).toBe("active");
+  });
+
+  it("money for a quote the admin already marked paid is flagged and the customer is told", async () => {
+    enablePayments();
+    const quote = await newQuote();
+    const { orderId } = await createCheckout({ quoteId: quote.id, leadId: leadA.id });
+    await recordManualPayment({ quoteId: quote.id }); // UPI recorded while checkout was open
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const err = await expectApiError(
+      verifyRazorpayPayment({
+        leadId: leadA.id,
+        quoteId: quote.id,
+        orderId,
+        paymentId: "pay_dup",
+        signature: sign(`${orderId}|pay_dup`, KEY_SECRET),
+      }),
+      409,
+      "BAD_REQUEST",
+    );
+    expect(err.message).toContain("already paid");
+    expect(await db.payment.count({ where: { status: "PAID" } })).toBe(1); // recorded for the refund
+    expect(await db.membership.count()).toBe(1); // no second plan
+  });
+
+  it("two renewals paid at the same moment stack instead of overlapping", async () => {
+    const [q1, q2] = [await newQuote(), await newQuote()];
+    const [m1, m2] = await Promise.all([recordManualPayment({ quoteId: q1.id }), recordManualPayment({ quoteId: q2.id })]);
+    const [first, second] = [m1, m2].sort((a, b) => a.validFrom.getTime() - b.validFrom.getTime());
+    expect(second.validFrom.getTime()).toBe(first.validUntil.getTime());
   });
 
   it("admin can record a UPI/cash payment once; a renewal starts when the current plan ends", async () => {
@@ -373,6 +406,11 @@ describe("memberships (paid plans)", () => {
     await cancelQuote({ quoteId: cancelled.id, adminUserId: "admin_1" });
     await expectApiError(recordManualPayment({ quoteId: cancelled.id }), 409, "BAD_REQUEST");
     expect(await db.membership.count()).toBe(2);
+  });
+
+  it("editing a plan that no longer exists, or impossible dates, gives a clear error", async () => {
+    await expectApiError(updateMembership({ id: "missing", validFrom: new Date(), validUntil: new Date(Date.now() + DAY) }), 404, "NOT_FOUND");
+    await expectApiError(updateMembership({ id: "missing", validFrom: new Date(NaN), validUntil: new Date() }), 422, "VALIDATION");
   });
 
   it("admin can move the dates; the end must be after the start", async () => {

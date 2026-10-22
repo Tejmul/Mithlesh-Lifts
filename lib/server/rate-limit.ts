@@ -19,6 +19,13 @@ export async function rateLimit(key: string, limit: number, windowSeconds: numbe
   return { allowed: count <= limit, count, retryAfter };
 }
 
+/** Current count in this window without adding a hit (for limits that only count failures). */
+export async function peekRateLimit(key: string, windowSeconds: number): Promise<number> {
+  const windowStart = new Date(Math.floor(Date.now() / (windowSeconds * 1000)) * windowSeconds * 1000);
+  const row = await db.rateLimit.findUnique({ where: { key_windowStart: { key, windowStart } } });
+  return row?.count ?? 0;
+}
+
 /** Throws a 429 ApiException when over the limit. */
 export async function enforceRateLimit(key: string, limit: number, windowSeconds: number, message?: string) {
   const r = await rateLimit(key, limit, windowSeconds);

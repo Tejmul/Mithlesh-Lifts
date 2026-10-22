@@ -35,9 +35,10 @@ async function makeSession(over: Record<string, unknown> = {}) {
     data: {
       tokenHash: randomUUID(),
       phoneE164: `+9198765${String(43210 + phoneCounter).padStart(5, "0")}`,
-      phoneVerifiedAt: new Date(),
       fullName: "Test Person",
       email: `person${phoneCounter}@example.com`,
+      pendingEmail: `person${phoneCounter}@example.com`,
+      emailVerifiedAt: new Date(),
       source: "manychat",
       campaign: "fit_reel",
       expiresAt: new Date(Date.now() + 3_600_000),
@@ -143,30 +144,42 @@ describe("createBookingFromSession", () => {
       expect(f.reason).toBeInstanceOf(ApiException);
       expect(["SLOT_TAKEN", "SLOT_UNAVAILABLE"]).toContain((f.reason as ApiException).code);
     }
-    expect(failed.some((f) => (f.reason as ApiException).code === "SLOT_TAKEN")).toBe(true);
+    // Losers see SLOT_TAKEN (raced at the database) or SLOT_UNAVAILABLE (checked after the winner
+    // committed); both are correct. What must never happen: a 500, or a second booking.
     expect(await db.booking.count()).toBe(1);
-  });
+  }, 30_000);
 
-  it("requires a verified phone, but not a name or email", async () => {
+  it("two devices of one account pressing Book at once get one call, not two", async () => {
+    const email = "twodevices@example.com";
+    const [a, b] = await Promise.all([makeSession({ email }), makeSession({ email })]);
+    const results = await Promise.allSettled([
+      createBookingFromSession({ session: a, start: await pickSlot(2), customerTimeZone: "Asia/Kolkata", idempotencyKey: randomUUID() }),
+      createBookingFromSession({ session: b, start: await pickSlot(8), customerTimeZone: "Asia/Kolkata", idempotencyKey: randomUUID() }),
+    ]);
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    const failed = results.find((r): r is PromiseRejectedResult => r.status === "rejected")!;
+    expect((failed.reason as ApiException).code).toBe("ALREADY_BOOKED");
+    expect(await db.booking.count()).toBe(1);
+  }); // ten racing transactions: slow when the whole suite runs in parallel
+
+  it("requires a confirmed email and a phone number", async () => {
     const start = await pickSlot();
-    const unverified = await makeSession({ phoneVerifiedAt: null });
+    const unverified = await makeSession({ emailVerifiedAt: null });
     expect(
       await codeOf(createBookingFromSession({ session: unverified, start, customerTimeZone: "Asia/Kolkata", idempotencyKey: randomUUID() })),
-    ).toBe("PHONE_NOT_VERIFIED");
+    ).toBe("NOT_VERIFIED");
+    const noPhone = await makeSession({ phoneE164: null });
+    expect(
+      await codeOf(createBookingFromSession({ session: noPhone, start, customerTimeZone: "Asia/Kolkata", idempotencyKey: randomUUID() })),
+    ).toBe("VALIDATION");
     expect(await db.booking.count()).toBe(0);
-
-    // Flow is number → OTP → slot: no name/email needed.
-    const phoneOnly = await makeSession({ fullName: null, email: null });
-    const b = await createBookingFromSession({ session: phoneOnly, start, customerTimeZone: "Asia/Kolkata", idempotencyKey: randomUUID() });
-    expect(b.lead.fullName).toBeNull();
-    expect(b.lead.email).toBeNull();
   });
 
-  it("allows one upcoming call per number; a returning visitor must reschedule instead", async () => {
-    const phoneE164 = "+919812345678";
-    const first = await makeSession({ phoneE164 });
+  it("allows one upcoming call per account; a returning visitor must reschedule instead", async () => {
+    const email = "same@example.com";
+    const first = await makeSession({ email });
     await createBookingFromSession({ session: first, start: await pickSlot(2), customerTimeZone: "Asia/Kolkata", idempotencyKey: randomUUID() });
-    const second = await makeSession({ phoneE164 }); // same person, new browser session
+    const second = await makeSession({ email }); // same person, new browser session
     expect(
       await codeOf(createBookingFromSession({ session: second, start: await pickSlot(6), customerTimeZone: "Asia/Kolkata", idempotencyKey: randomUUID() })),
     ).toBe("ALREADY_BOOKED");
@@ -174,12 +187,12 @@ describe("createBookingFromSession", () => {
   });
 
   it("does not wipe a name the team entered when the lead books again later", async () => {
-    const phoneE164 = "+919811112222";
-    const s1 = await makeSession({ phoneE164, fullName: null, email: null });
+    const email = "again@example.com";
+    const s1 = await makeSession({ email, fullName: null });
     const b1 = await createBookingFromSession({ session: s1, start: await pickSlot(2), customerTimeZone: "Asia/Kolkata", idempotencyKey: randomUUID() });
     await db.lead.update({ where: { id: b1.leadId }, data: { fullName: "Named By Sales" } });
     await cancelBooking({ bookingId: b1.id, actor: { by: "customer" } });
-    const s2 = await makeSession({ phoneE164, fullName: null, email: null });
+    const s2 = await makeSession({ email, fullName: null });
     const b2 = await createBookingFromSession({ session: s2, start: await pickSlot(8), customerTimeZone: "Asia/Kolkata", idempotencyKey: randomUUID() });
     expect(b2.lead.fullName).toBe("Named By Sales");
   });

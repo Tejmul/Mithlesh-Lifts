@@ -41,7 +41,7 @@ export default async function DashboardPage({ searchParams }: PageProps<"/admin"
   ]);
   const funnel = await getFunnel(period, tz, now);
   const steps = [
-    { label: "Verified numbers", value: funnel.verified, prev: null as number | null },
+    { label: "Verified sign-ups", value: funnel.verified, prev: null as number | null },
     { label: "Calls booked", value: funnel.booked, prev: funnel.verified },
     { label: "Calls completed", value: funnel.completed, prev: funnel.booked },
     { label: "Clients", value: funnel.clients, prev: funnel.completed },

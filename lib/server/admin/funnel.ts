@@ -60,7 +60,7 @@ export async function getFunnel(period: FunnelPeriod, coachTimeZone: string, now
   const [verifiedGroups, bookingGroups, quotesSent, paidQuotes] = await Promise.all([
     db.bookingSession.groupBy({
       by: ["source", "campaign", "phoneE164"],
-      where: { phoneVerifiedAt: range, phoneE164: { not: null } },
+      where: { emailVerifiedAt: range, phoneE164: { not: null } },
     }),
     db.booking.groupBy({
       by: ["source", "campaign", "status"],

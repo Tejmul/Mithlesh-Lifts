@@ -1,11 +1,12 @@
 import "server-only";
 // OWNER: Agent B.
 import { DateTime } from "luxon";
-import type { Booking, BookingSession, Lead } from "@/generated/prisma/client";
+import type { Booking, BookingSession, Lead, Prisma } from "@/generated/prisma/client";
 import type { BookingView } from "@/lib/shared/api";
 import { attachBookingToSession } from "../booking-session";
 import { bookingReference, hmac, safeEqual } from "../crypto";
-import { db, TX_OPTIONS, isConstraintViolation } from "../db";
+import { db, TX_OPTIONS, isConstraintViolation, isTransactionConflict, isTransactionTimeout } from "../db";
+import { freeClientCode } from "../customer-auth";
 import { env } from "../env";
 import { ApiException } from "../http";
 import { addInboxItem } from "../inbox";
@@ -52,12 +53,12 @@ function p2002Targets(err: unknown): string {
 }
 
 /**
- * One transaction: re-check session (phone verified, not already booked, no other upcoming call
- * for this number),
- * re-check the slot against live availability, upsert Lead by phone, insert Booking (the DB
+ * One transaction: re-check session (email verified, not already booked, no other upcoming call
+ * for this account),
+ * re-check the slot against live availability, upsert Lead by email, insert Booking (the DB
  * exclusion constraint is the final guard → SLOT_TAKEN), attach to session, enqueue emails.
  * Idempotent on idempotencyKey (same key → same booking, no duplicate emails).
- * Throws ApiException: PHONE_NOT_VERIFIED, SLOT_TAKEN, SLOT_UNAVAILABLE, ALREADY_BOOKED.
+ * Throws ApiException: NOT_VERIFIED, SLOT_TAKEN, SLOT_UNAVAILABLE, ALREADY_BOOKED.
  */
 export async function createBookingFromSession(input: {
   session: BookingSession;
@@ -68,7 +69,7 @@ export async function createBookingFromSession(input: {
   const { session, start, customerTimeZone, idempotencyKey } = input;
 
   const existingForKey = () => db.booking.findUnique({ where: { idempotencyKey }, include: { lead: true } });
-  const ownedBySession = (b: BookingWithLead) => b.id === session.bookingId || b.lead.phoneE164 === session.phoneE164;
+  const ownedBySession = (b: BookingWithLead) => b.id === session.bookingId || (session.email !== null && b.lead.email === session.email);
 
   if (session.bookingId) {
     const b = await existingForKey();
@@ -82,11 +83,17 @@ export async function createBookingFromSession(input: {
     throw new ApiException(409, "ALREADY_BOOKED", "You've already booked a call.");
   }
 
-  if (!session.phoneVerifiedAt || !session.phoneE164) {
-    throw new ApiException(403, "PHONE_NOT_VERIFIED", "Verify your phone number first.");
+  if (!session.emailVerifiedAt || !session.email) {
+    throw new ApiException(403, "NOT_VERIFIED", "Confirm your email first.");
   }
+  if (!session.phoneE164) {
+    throw new ApiException(422, "VALIDATION", "Add your mobile number so our team can call you.", {
+      phone: "Enter your mobile number.",
+    });
+  }
+  const email = session.email;
   const phoneE164 = session.phoneE164;
-  const phoneVerifiedAt = session.phoneVerifiedAt;
+  const emailVerifiedAt = session.emailVerifiedAt;
 
   if (Number.isNaN(start.getTime()) || !(await isOfferedSlot(start))) {
     throw new ApiException(409, "SLOT_UNAVAILABLE", SLOT_UNAVAILABLE_MSG);
@@ -110,28 +117,50 @@ export async function createBookingFromSession(input: {
           throw new ApiException(409, "ALREADY_BOOKED", "You've already booked a call.");
         }
 
-        // One upcoming call per number: a returning visitor reschedules instead of double-booking.
+        // Queue concurrent attempts instead of letting them collide: per account (two devices pressing
+        // Book at once can't both pass the one-call check) and per start time (racers for the same
+        // slot wait for the winner, then get SLOT_TAKEN from the overlap guard, never a deadlock).
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`booking:email:${email}`}))`;
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`booking:slot:${start.toISOString()}`}))`;
+
+        // One upcoming call per account: a returning visitor reschedules instead of double-booking.
         const upcoming = await tx.booking.findFirst({
-          where: { lead: { phoneE164 }, status: "CONFIRMED", startsAt: { gt: new Date() } },
+          where: { lead: { email }, status: "CONFIRMED", startsAt: { gt: new Date() } },
           select: { id: true },
         });
         if (upcoming) throw new ApiException(409, "ALREADY_BOOKED", "You already have a call booked. Reschedule it instead.");
 
-        // Name/email are optional (flow is number → OTP → slot); never overwrite values the team entered.
-        const leadData = {
-          ...(session.fullName ? { fullName: session.fullName } : {}),
-          ...(session.email ? { email: session.email } : {}),
-          phoneVerifiedAt,
-          source: session.source,
-          campaign: session.campaign,
-          manychatSubscriberId: session.manychatSubscriberId,
-          marketingConsentAt: session.marketingConsent ? new Date() : null,
-        };
-        const lead = await tx.lead.upsert({
-          where: { phoneE164 },
-          create: { phoneE164, ...leadData },
-          update: leadData,
-        });
+        // The account exists already (created when the email was confirmed). Only fill gaps: never drop
+        // a name the team entered, and the first ManyChat campaign / consent stay as recorded.
+        const existing = await tx.lead.findUnique({ where: { email } });
+        const lead = existing
+          ? await tx.lead.update({
+              where: { id: existing.id },
+              data: {
+                phoneE164,
+                emailVerifiedAt,
+                ...(!existing.fullName?.trim() && session.fullName ? { fullName: session.fullName } : {}),
+                ...(!existing.source && session.source ? { source: session.source } : {}),
+                ...(!existing.campaign && session.campaign ? { campaign: session.campaign } : {}),
+                ...(!existing.manychatSubscriberId && session.manychatSubscriberId
+                  ? { manychatSubscriberId: session.manychatSubscriberId }
+                  : {}),
+                ...(session.marketingConsent && !existing.marketingConsentAt ? { marketingConsentAt: new Date() } : {}),
+              },
+            })
+          : await tx.lead.create({
+              data: {
+                email,
+                phoneE164,
+                emailVerifiedAt,
+                fullName: session.fullName,
+                source: session.source,
+                campaign: session.campaign,
+                manychatSubscriberId: session.manychatSubscriberId,
+                marketingConsentAt: session.marketingConsent ? new Date() : null,
+                clientCode: await freeClientCode(tx, session.fullName),
+              },
+            });
 
         const created = await tx.booking.create({
           data: {
@@ -162,6 +191,12 @@ export async function createBookingFromSession(input: {
     } catch (err) {
       if (err instanceof ApiException) throw err;
       if (isConstraintViolation(err, "23P01")) throw slotTaken();
+      // Deadlock / serialization failure between racers for overlapping slots: someone else won.
+      if (isTransactionConflict(err)) throw slotTaken();
+      // Couldn't get a transaction in time (very busy): ask to retry instead of a bare 500.
+      if (isTransactionTimeout(err)) {
+        throw new ApiException(503, "INTERNAL", "We're very busy right now. Please tap Book again in a moment.");
+      }
       if (isConstraintViolation(err, "P2002")) {
         const again = await existingForKey();
         if (again) {
@@ -192,10 +227,18 @@ export function formatCallTime(booking: Pick<Booking, "startsAt" | "customerTime
   return zone ? `${when} (${zone})` : when;
 }
 
-/** The number's next confirmed call, if any — shown to returning visitors after they verify. */
-export async function findUpcomingBookingForPhone(phoneE164: string): Promise<BookingWithLead | null> {
+/** The account's next confirmed call, if any — shown to returning visitors after they verify. */
+export async function findUpcomingBookingForEmail(email: string): Promise<BookingWithLead | null> {
+  return findUpcomingBooking({ lead: { email } });
+}
+
+export async function findUpcomingBookingForLead(leadId: string): Promise<BookingWithLead | null> {
+  return findUpcomingBooking({ leadId });
+}
+
+async function findUpcomingBooking(where: Prisma.BookingWhereInput): Promise<BookingWithLead | null> {
   return db.booking.findFirst({
-    where: { lead: { phoneE164 }, status: "CONFIRMED", startsAt: { gt: new Date() } },
+    where: { ...where, status: "CONFIRMED", startsAt: { gt: new Date() } },
     orderBy: { startsAt: "asc" },
     include: { lead: true },
   });
@@ -307,9 +350,16 @@ export async function setBookingStatus(input: {
   bookingId: string;
   status: "CONFIRMED" | "COMPLETED" | "NO_SHOW";
 }): Promise<BookingWithLead> {
+  // A cancelled call stays cancelled: reviving it would skip reminders and the one-call rule and
+  // re-enable old manage links. Book a new call for the client instead.
+  const current = await db.booking.findUnique({ where: { id: input.bookingId }, select: { status: true } });
+  if (!current) throw new ApiException(404, "NOT_FOUND", "Booking not found.");
+  if (current.status === "CANCELLED") {
+    throw new ApiException(409, "BAD_REQUEST", "This call was cancelled and can't be changed. Book a new call for the client instead.");
+  }
   try {
     return await db.booking.update({
-      where: { id: input.bookingId },
+      where: { id: input.bookingId, status: { not: "CANCELLED" } },
       data: { status: input.status },
       include: { lead: true },
     });

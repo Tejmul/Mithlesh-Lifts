@@ -7,11 +7,12 @@ import type { BookingResponse, BookingSessionView, SessionResponse, StartSession
 import { maskPhone, trackingSchema } from "@/lib/shared/validation";
 import { ApiError, apiFetch } from "./api-client";
 import { canonicalZone, fmtDate, fmtTime } from "./format";
-import { PhoneStep } from "./PhoneStep";
+import { markJustBooked } from "@/components/account/just-booked";
+import { EmailStep } from "./EmailStep";
 import { Progress } from "./Progress";
 import { SlotPicker, type Slot } from "./SlotPicker";
 
-/** docs/FLOW.md: ① mobile number + OTP → ② pick a time → booked, logged in, sent to /account. */
+/** docs/FLOW.md: ① name + email + phone → code by email → ② pick a time → booked, logged in, sent to /account. */
 type Step = 1 | 2;
 type Boot = { status: "loading" } | { status: "error"; message: string } | { status: "ready" };
 
@@ -58,9 +59,9 @@ export function BookingWizard() {
 
   const next = searchParams.get("next");
   const accountNext = next && /^\/account(\/|$)/.test(next) ? next : null;
-  const [country, setCountry] = useState("IN");
-  const [phone, setPhone] = useState("");
-  const [phoneNotice, setPhoneNotice] = useState<string | null>(null);
+  /** Prefill for step 1 when a session comes back (refresh, "Change details"). */
+  const [initial, setInitial] = useState<{ fullName?: string; email?: string; country?: string; phone?: string }>({});
+  const [stepNotice, setStepNotice] = useState<string | null>(null);
 
   const [timeZone, setTimeZone] = useState("");
   const [slot, setSlot] = useState<Slot | null>(null);
@@ -73,8 +74,9 @@ export function BookingWizard() {
   /** Apply a fresh session snapshot: logged-in people with a call (or a "next") go to their account. */
   const applySession = useCallback(
     (s: BookingSessionView, opts: { initial: boolean }) => {
-      if (s.bookingReference) {
-        router.replace("/account?booked=1");
+      // Only a logged-in customer is sent to /account (a logged-out one would bounce back here).
+      if (s.bookingReference && s.account) {
+        router.replace("/account");
         return;
       }
       if (s.account && (accountNext || s.upcomingBooking)) {
@@ -83,14 +85,15 @@ export function BookingWizard() {
       }
       setSession(s);
       if (opts.initial) {
-        const known = s.phoneE164 ?? s.pendingPhoneE164;
-        const parsed = known ? parsePhoneNumberFromString(known) : undefined;
-        if (parsed?.country) {
-          setCountry(parsed.country);
-          setPhone(parsed.formatNational());
-        }
+        const parsed = s.phoneE164 ? parsePhoneNumberFromString(s.phoneE164) : undefined;
+        setInitial({
+          fullName: s.fullName ?? undefined,
+          email: s.email ?? s.pendingEmail ?? undefined,
+          ...(parsed?.country ? { country: parsed.country, phone: parsed.formatNational() } : {}),
+        });
       }
-      setStep(s.phoneVerified ? 2 : 1);
+      // Calendar once the email is confirmed and the account exists (name + phone known).
+      setStep(s.verified && s.account ? 2 : 1);
     },
     [router, accountNext],
   );
@@ -192,19 +195,17 @@ export function BookingWizard() {
       <Progress step={step} />
 
       {step === 1 && (
-        <PhoneStep
+        <EmailStep
+          key={session?.verified ? "details" : "email"}
           loggingIn={Boolean(accountNext)}
-          country={country}
-          phone={phone}
-          onCountryChange={setCountry}
-          onPhoneChange={setPhone}
-          verifiedPhone={session?.phoneVerified ? session.phoneE164 : null}
+          needsDetails={Boolean(session?.verified && !session.account)}
+          verifiedEmail={session?.verified ? session.email : null}
+          initial={initial}
           headingRef={headingRef}
-          notice={phoneNotice}
+          notice={stepNotice}
           onSessionExpired={() => setExpired(true)}
-          onContinueVerified={() => setStep(2)}
           onVerified={({ session: s }) => {
-            setPhoneNotice(null);
+            setStepNotice(null);
             applySession(s, { initial: false });
           }}
         />
@@ -224,15 +225,18 @@ export function BookingWizard() {
           }}
           slotsReload={slotsReload}
           notice={slotNotice}
-          onBooked={() => router.replace("/account?booked=1")}
-          onSlotGone={() => {
+          onBooked={() => {
+            markJustBooked();
+            router.replace("/account");
+          }}
+          onSlotGone={(message) => {
             setSlot(null);
-            setSlotNotice("That time was just taken by someone else. Please pick another. The times below are up to date.");
+            setSlotNotice(message);
             setSlotsReload((k) => k + 1);
           }}
           onAlreadyBooked={() => void refreshSession()}
-          onPhoneNotVerified={() => {
-            setPhoneNotice("Please verify your number again.");
+          onNotVerified={() => {
+            setStepNotice("Please confirm your email again.");
             setStep(1);
           }}
           onSessionExpired={() => setExpired(true)}
@@ -258,9 +262,9 @@ function TimeStep({
   slotsReload: number;
   notice: string | null;
   onBooked: () => void;
-  onSlotGone: () => void;
+  onSlotGone: (message: string) => void;
   onAlreadyBooked: () => void;
-  onPhoneNotVerified: () => void;
+  onNotVerified: () => void;
   onSessionExpired: () => void;
 }) {
   const [pending, setPending] = useState(false);
@@ -285,12 +289,13 @@ function TimeStep({
       if (!(err instanceof ApiError)) throw err;
       switch (err.code) {
         case "SLOT_TAKEN":
+          return p.onSlotGone("That time was just taken by someone else. Please pick another. The times below are up to date.");
         case "SLOT_UNAVAILABLE":
-          return p.onSlotGone();
+          return p.onSlotGone("That time is no longer available. Please pick another. The times below are up to date.");
         case "ALREADY_BOOKED":
           return p.onAlreadyBooked();
-        case "PHONE_NOT_VERIFIED":
-          return p.onPhoneNotVerified();
+        case "NOT_VERIFIED":
+          return p.onNotVerified();
         case "SESSION_EXPIRED":
           return p.onSessionExpired();
         case "RATE_LIMITED":
@@ -318,7 +323,7 @@ function TimeStep({
         Pick a time for your call
       </h2>
       <p className="step-lede">
-        A {p.callMinutes}-minute call to {p.session.phoneE164 ? maskPhone(p.session.phoneE164) : "your verified number"}.
+        A {p.callMinutes}-minute call to {p.session.phoneE164 ? maskPhone(p.session.phoneE164) : "your number"}.
       </p>
       {p.notice && (
         <p className="notice notice-error" role="alert">

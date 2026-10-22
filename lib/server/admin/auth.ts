@@ -8,16 +8,18 @@ import type { AdminUser } from "@/generated/prisma/client";
 import { db } from "../db";
 import { hashPassword, hashToken, randomToken, verifyPassword } from "../crypto";
 import { ApiException } from "../http";
-import { enforceRateLimit } from "../rate-limit";
+import { enforceRateLimit, peekRateLimit, rateLimit } from "../rate-limit";
 import { logEvent } from "../observability";
 
 export const ADMIN_COOKIE = "css_admin";
 
-export const ADMIN_SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+/** A shared sales laptop left signed in loses access after a day. */
+export const ADMIN_SESSION_TTL_MS = 24 * 60 * 60 * 1000;
 export const LOGIN_FAILED_MESSAGE = "Email or password is incorrect.";
 const LOGIN_WINDOW_SECONDS = 15 * 60;
 const LOGIN_LIMIT_PER_IP = 10;
-const LOGIN_LIMIT_PER_EMAIL = 5;
+/** Failed passwords per admin email. Only failures count, so the real admin can still sign in. */
+const LOGIN_FAILURES_PER_EMAIL = 10;
 
 // Compared against when the email doesn't exist, so response time doesn't reveal valid accounts.
 let dummyHash: Promise<string> | undefined;
@@ -44,16 +46,15 @@ export async function authenticate(
   const tooMany = "Too many sign-in attempts. Please wait 15 minutes and try again.";
   // Keys are hashed so the RateLimit table never holds raw emails or IPs.
   await enforceRateLimit(`admin-login:ip:${hashToken(ip)}`, LOGIN_LIMIT_PER_IP, LOGIN_WINDOW_SECONDS, tooMany);
-  await enforceRateLimit(
-    `admin-login:email:${hashToken(normalized)}`,
-    LOGIN_LIMIT_PER_EMAIL,
-    LOGIN_WINDOW_SECONDS,
-    tooMany,
-  );
+  const failKey = `admin-login:fail:${hashToken(normalized)}`;
+  if ((await peekRateLimit(failKey, LOGIN_WINDOW_SECONDS)) >= LOGIN_FAILURES_PER_EMAIL) {
+    throw new ApiException(429, "RATE_LIMITED", tooMany);
+  }
 
   const admin = await db.adminUser.findUnique({ where: { email: normalized } });
   const ok = await verifyPassword(password, admin?.passwordHash ?? (await getDummyHash()));
   if (!admin || !ok) {
+    await rateLimit(failKey, LOGIN_FAILURES_PER_EMAIL, LOGIN_WINDOW_SECONDS);
     logEvent("admin.login_failed");
     throw new ApiException(401, "UNAUTHORIZED", LOGIN_FAILED_MESSAGE);
   }

@@ -76,7 +76,7 @@ describe("customer templates", () => {
   });
   it("handles null meeting and manage links", () => {
     const e = bookingConfirmed({ ...base, meetingUrl: null, manageUrl: null });
-    expect(e.text).toContain("Our sales team will call you on your verified number at this time.");
+    expect(e.text).toContain("Our sales team will call you on the number you gave at this time.");
     expect(e.text).toContain("Message us on Instagram");
     expect(e.html).not.toContain("Reschedule or cancel</a>");
     expect(e.html).not.toContain("null");

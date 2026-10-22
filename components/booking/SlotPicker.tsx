@@ -4,6 +4,7 @@ import { DateTime } from "luxon";
 import { useEffect, useId, useMemo, useState } from "react";
 import type { AvailabilityResponse } from "@/lib/shared/api";
 import { ApiError, apiFetch } from "./api-client";
+import { parseWhen } from "./parse-when";
 
 export type Slot = { start: string; end: string };
 
@@ -48,7 +49,8 @@ function dayLabel(date: DateTime, today: DateTime) {
 }
 
 /**
- * The simplest possible picker: tap a day, tap a time. Only days with free times are shown.
+ * Month calendar (like Google Calendar) + the chosen day's free times, plus a "type a day and time"
+ * box ("tomorrow 6:30 pm") that selects the slot or offers the closest free ones.
  * Times are shown in the visitor's time zone (auto-detected, changeable).
  */
 export function SlotPicker({ timeZone, onTimeZoneChange, selected, onSelect, reloadKey = 0, excludeStart, labelledBy }: Props) {
@@ -58,6 +60,11 @@ export function SlotPicker({ timeZone, onTimeZoneChange, selected, onSelect, rel
   const requestKey = `${reloadKey}:${attempt}`;
   const [loaded, setLoaded] = useState<Loaded | null>(null);
   const [pickedDay, setPickedDay] = useState<string | null>(null);
+  /** Month shown in the grid, "yyyy-MM"; null = the month of the first free day. */
+  const [monthPick, setMonth] = useState<string | null>(null);
+  const typeId = useId();
+  const [typed, setTyped] = useState("");
+  const [typedResult, setTypedResult] = useState<{ message: string; options: Slot[] } | null>(null);
 
   useEffect(() => {
     const ctrl = { cancelled: false };
@@ -97,6 +104,7 @@ export function SlotPicker({ timeZone, onTimeZoneChange, selected, onSelect, rel
   const activeKey = pickedDay && days.some((d) => d.key === pickedDay) ? pickedDay : (days[0]?.key ?? null);
   const active = days.find((d) => d.key === activeKey);
   const today = DateTime.now().setZone(timeZone || "local");
+  const month = monthPick ?? activeKey?.slice(0, 7) ?? today.toFormat("yyyy-LL");
   const options = useMemo(() => (showTz ? zoneOptions(timeZone) : []), [showTz, timeZone]);
   const zoneShort = DateTime.now().setZone(timeZone || "local").toFormat("ZZZZ");
 
@@ -106,11 +114,8 @@ export function SlotPicker({ timeZone, onTimeZoneChange, selected, onSelect, rel
         <p className="sr-only" role="status">
           Loading free times…
         </p>
-        <div className="day-strip" aria-hidden="true">
-          {Array.from({ length: 5 }, (_, i) => (
-            <span key={i} className="skeleton day-skel" />
-          ))}
-        </div>
+        <span className="skeleton" style={{ height: 52, borderRadius: 14 }} aria-hidden="true" />
+        <span className="skeleton" style={{ height: 260, borderRadius: 18 }} aria-hidden="true" />
         <div className="time-grid" aria-hidden="true">
           {Array.from({ length: 6 }, (_, i) => (
             <span key={i} className="skeleton time-skel" />
@@ -142,60 +147,216 @@ export function SlotPicker({ timeZone, onTimeZoneChange, selected, onSelect, rel
     );
   }
 
-  return (
-    <div className="picker" role="group" aria-labelledby={labelledBy}>
-      <p className="picker-label">1. Pick a day</p>
-      <div className="day-strip" role="listbox" aria-label="Days with free times">
-        {days.map((d) => {
-          const on = d.key === activeKey;
-          return (
-            <button
-              key={d.key}
-              type="button"
-              role="option"
-              aria-selected={on}
-              className={`day${on ? " is-on" : ""}`}
-              onClick={() => {
-                setPickedDay(d.key);
-                if (selected && DateTime.fromISO(selected.start, { zone: timeZone }).toISODate() !== d.key) onSelect(null);
-              }}
-            >
-              <span className="day-name">{dayLabel(d.date, today)}</span>
-              <span className="day-num">{d.date.toFormat("d")}</span>
-              <span className="day-month">{d.date.toFormat("LLL")}</span>
-            </button>
-          );
-        })}
-      </div>
+  const fmtSlot = (s: Slot) => DateTime.fromISO(s.start, { zone: timeZone }).toFormat("h:mm a");
 
-      <p className="picker-label">2. Pick a time</p>
-      {active &&
-        PARTS.map((part) => {
-          const slots = active.slots.filter((s) => part.test(DateTime.fromISO(s.start, { zone: timeZone }).hour));
-          if (!slots.length) return null;
-          return (
-            <div key={part.key} className="time-group">
-              <p className="time-group-label">{part.label}</p>
-              <ul className="time-grid">
-                {slots.map((s) => {
-                  const on = selected?.start === s.start;
-                  return (
-                    <li key={s.start}>
-                      <button
-                        type="button"
-                        className={`time${on ? " is-on" : ""}`}
-                        aria-pressed={on}
-                        onClick={() => onSelect(on ? null : s)}
-                      >
-                        {DateTime.fromISO(s.start, { zone: timeZone }).toFormat("h:mm a")}
-                      </button>
-                    </li>
-                  );
-                })}
-              </ul>
-            </div>
-          );
-        })}
+  function pickDay(key: string) {
+    setPickedDay(key);
+    setMonth(key.slice(0, 7));
+    if (selected && DateTime.fromISO(selected.start, { zone: timeZone }).toISODate() !== key) onSelect(null);
+  }
+
+  /** "tomorrow 6:30 pm" → select that slot, or show the closest free ones. */
+  function findTyped() {
+    const parsed = parseWhen(typed, today);
+    if (!parsed) {
+      setTypedResult({ message: "Try something like “tomorrow 6:30 pm” or “sat 11am”.", options: [] });
+      return;
+    }
+    const dayKey = parsed.date ?? activeKey;
+    let day = days.find((d) => d.key === dayKey);
+    let note = "";
+    if (!day) {
+      // Nothing free that day: jump to the next day that has times.
+      day = days.find((d) => dayKey && d.key > dayKey) ?? days[days.length - 1];
+      if (!day) return;
+      const asked = dayKey ? DateTime.fromISO(dayKey, { zone: timeZone }).toFormat("ccc d LLL") : "that day";
+      note = `No free times on ${asked}. `;
+    }
+    pickDay(day.key);
+    if (parsed.minutes === undefined) {
+      setTypedResult({ message: `${note}Showing ${day.date.toFormat("cccc d LLLL")}. Pick a time below.`, options: [] });
+      return;
+    }
+    const mins = (s: Slot) => {
+      const t = DateTime.fromISO(s.start, { zone: timeZone });
+      return t.hour * 60 + t.minute;
+    };
+    const exact = !note ? day.slots.find((s) => mins(s) === parsed.minutes) : undefined;
+    if (exact) {
+      onSelect(exact);
+      setTypedResult({ message: `${day.date.toFormat("ccc d LLL")} at ${fmtSlot(exact)} is free. Selected.`, options: [] });
+      return;
+    }
+    const closest = [...day.slots].sort((a, b) => Math.abs(mins(a) - parsed.minutes!) - Math.abs(mins(b) - parsed.minutes!)).slice(0, 3);
+    closest.sort((a, b) => a.start.localeCompare(b.start));
+    const wanted = DateTime.fromObject({ hour: Math.floor(parsed.minutes / 60), minute: parsed.minutes % 60 }).toFormat("h:mm a");
+    setTypedResult({
+      message: `${note}${note ? "" : `${wanted} isn't available. `}Closest free times on ${day.date.toFormat("ccc d LLL")}:`,
+      options: closest,
+    });
+  }
+
+  // ---- month grid (Monday first, like most calendars in India)
+  const monthStart = DateTime.fromISO(`${month}-01`, { zone: timeZone || "local" });
+  const firstMonth = days[0]!.key.slice(0, 7);
+  const lastMonth = days[days.length - 1]!.key.slice(0, 7);
+  const byKey = new Map(days.map((d) => [d.key, d]));
+  const cells: (DateTime | null)[] = [
+    ...Array.from({ length: monthStart.weekday - 1 }, () => null),
+    ...Array.from({ length: monthStart.daysInMonth ?? 30 }, (_, i) => monthStart.plus({ days: i })),
+  ];
+  const todayKey = today.toISODate();
+
+  return (
+    <div className="picker cal" role="group" aria-labelledby={labelledBy}>
+      <form
+        className="cal-type"
+        onSubmit={(e) => {
+          e.preventDefault();
+          findTyped();
+        }}
+      >
+        <label htmlFor={typeId}>Type a day and time</label>
+        <div className="cal-type-row">
+          <input
+            id={typeId}
+            type="text"
+            inputMode="text"
+            autoComplete="off"
+            placeholder="e.g. tomorrow 6:30 pm"
+            value={typed}
+            onChange={(e) => setTyped(e.target.value)}
+            aria-describedby={typedResult ? `${typeId}-result` : undefined}
+          />
+          <button type="submit" className="btn btn-ghost">
+            Find
+          </button>
+        </div>
+        {typedResult && (
+          <div id={`${typeId}-result`} className="cal-type-result" role="status">
+            <p>{typedResult.message}</p>
+            {typedResult.options.length > 0 && (
+              <div className="cal-type-options">
+                {typedResult.options.map((s) => (
+                  <button
+                    key={s.start}
+                    type="button"
+                    className={`time${selected?.start === s.start ? " is-on" : ""}`}
+                    aria-pressed={selected?.start === s.start}
+                    onClick={() => onSelect(s)}
+                  >
+                    {fmtSlot(s)}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </form>
+
+      <p className="cal-or" aria-hidden="true">
+        <span>or pick on the calendar</span>
+      </p>
+
+      <div className="cal-body">
+        <div className="cal-month">
+          <div className="cal-head">
+            <button
+              type="button"
+              className="cal-nav"
+              onClick={() => setMonth(monthStart.minus({ months: 1 }).toFormat("yyyy-LL"))}
+              disabled={month <= firstMonth}
+              aria-label="Previous month"
+            >
+              <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+                <path d="M15 6l-6 6 6 6" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </button>
+            <p className="cal-title" aria-live="polite">
+              {monthStart.toFormat("LLLL yyyy")}
+            </p>
+            <button
+              type="button"
+              className="cal-nav"
+              onClick={() => setMonth(monthStart.plus({ months: 1 }).toFormat("yyyy-LL"))}
+              disabled={month >= lastMonth}
+              aria-label="Next month"
+            >
+              <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+                <path d="M9 6l6 6-6 6" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </button>
+          </div>
+          <div className="cal-grid">
+            {["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((w) => (
+              <span key={w} className="cal-wd" aria-hidden="true">
+                {w.slice(0, 1)}
+                <span className="cal-wd-rest">{w.slice(1)}</span>
+              </span>
+            ))}
+            {cells.map((c, i) => {
+              if (!c) return <span key={`b${i}`} aria-hidden="true" />;
+              const key = c.toISODate()!;
+              const day = byKey.get(key);
+              const on = key === activeKey;
+              return (
+                <button
+                  key={key}
+                  type="button"
+                  className={`cal-day${on ? " is-on" : ""}${day ? " has-slots" : ""}${key === todayKey ? " is-today" : ""}`}
+                  disabled={!day}
+                  aria-pressed={on}
+                  aria-label={`${c.toFormat("cccc d LLLL")}${day ? `, ${day.slots.length} free time${day.slots.length === 1 ? "" : "s"}` : ", no free times"}`}
+                  onClick={() => pickDay(key)}
+                >
+                  {c.day}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        <div className="cal-times">
+          {active && (
+            <>
+              <p className="cal-times-title">
+                {dayLabel(active.date, today) === active.date.toFormat("ccc")
+                  ? active.date.toFormat("cccc d LLLL")
+                  : `${dayLabel(active.date, today)} · ${active.date.toFormat("ccc d LLL")}`}
+                <span>
+                  {active.slots.length} free time{active.slots.length === 1 ? "" : "s"}
+                </span>
+              </p>
+              {PARTS.map((part) => {
+                const slots = active.slots.filter((s) => part.test(DateTime.fromISO(s.start, { zone: timeZone }).hour));
+                if (!slots.length) return null;
+                return (
+                  <div key={part.key} className="time-group">
+                    <p className="time-group-label">{part.label}</p>
+                    <ul className="time-grid">
+                      {slots.map((s) => {
+                        const on = selected?.start === s.start;
+                        return (
+                          <li key={s.start}>
+                            <button
+                              type="button"
+                              className={`time${on ? " is-on" : ""}`}
+                              aria-pressed={on}
+                              onClick={() => onSelect(on ? null : s)}
+                            >
+                              {fmtSlot(s)}
+                            </button>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  </div>
+                );
+              })}
+            </>
+          )}
+        </div>
+      </div>
 
       <div className="tz-line">
         <span>

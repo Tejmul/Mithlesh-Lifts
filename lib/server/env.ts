@@ -53,9 +53,14 @@ export function env(): Env {
   }
   const e = parsed.data;
   if (e.NODE_ENV === "production") {
-    if (e.PHONE_VERIFY_PROVIDER === "mock") throw new Error("PHONE_VERIFY_PROVIDER=mock is not allowed in production");
+    // Phone OTP is parked (sign-in codes go by email, docs/FLOW.md), so PHONE_VERIFY_PROVIDER isn't checked here.
     if (e.EMAIL_PROVIDER === "mock") throw new Error("EMAIL_PROVIDER=mock is not allowed in production");
-    if (e.APP_URL.includes("localhost")) throw new Error("APP_URL must be the public URL in production");
+    if (e.APP_URL.includes("localhost") || /REPLACE/i.test(e.APP_URL)) {
+      throw new Error("APP_URL must be the public URL in production");
+    }
+    // Sign-in codes go by email: without these nobody could log in or book.
+    if (e.EMAIL_PROVIDER === "resend" && !e.RESEND_API_KEY) throw new Error("RESEND_API_KEY is required in production");
+    if (/@example\.com/i.test(e.EMAIL_FROM)) throw new Error("EMAIL_FROM must be a real sender in production");
   }
   cached = e;
   return e;

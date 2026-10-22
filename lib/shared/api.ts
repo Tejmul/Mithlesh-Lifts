@@ -1,5 +1,5 @@
 // Public API contract between the booking UI and the server. Both sides import these types.
-// Flow: start → phone/send → phone/verify → (availability) → confirm. Name/email are optional.
+// Flow (docs/FLOW.md): start → email/send (name + email + phone) → email/verify → (availability) → confirm.
 // Errors: HTTP 4xx/5xx with body ApiErrorBody. Timestamps: ISO 8601 UTC strings.
 
 export type ApiErrorCode =
@@ -10,7 +10,7 @@ export type ApiErrorCode =
   | "NOT_FOUND"
   | "RATE_LIMITED"
   | "SESSION_EXPIRED"
-  | "PHONE_NOT_VERIFIED"
+  | "NOT_VERIFIED"
   | "OTP_INVALID" // wrong or expired — deliberately not distinguished
   | "OTP_COOLDOWN"
   | "OTP_SEND_FAILED"
@@ -26,12 +26,14 @@ export type ApiErrorBody = {
 
 // ---------------------------------------------------------------- session
 
-/** Snapshot of the visitor's progress. Returned by start / phone/verify / contact. */
+/** Snapshot of the visitor's progress. Returned by start / email/verify / details. */
 export type BookingSessionView = {
-  /** Number the last code was sent to (E.164), if any. */
-  pendingPhoneE164: string | null;
+  /** Email the last code was sent to, if any. */
+  pendingEmail: string | null;
+  /** Number the sales team will call (entered, not verified). */
   phoneE164: string | null;
-  phoneVerified: boolean;
+  /** Email confirmed with the code. */
+  verified: boolean;
   fullName: string | null;
   email: string | null;
   callMinutes: number;
@@ -40,7 +42,7 @@ export type BookingSessionView = {
   bookingReference: string | null;
   /** After verification: this number's next confirmed call (returning visitor → offer reschedule/cancel). */
   upcomingBooking: BookingView | null;
-  /** Set once the visitor is logged in (phone verified → account exists). */
+  /** Set once the visitor is logged in (email verified → account exists). verified && !account → ask name + phone. */
   account: AccountSummary | null;
 };
 
@@ -54,19 +56,23 @@ export type SessionResponse = { session: BookingSessionView };
 export type StartSessionRequest = { source?: string; campaign?: string; mc?: string };
 
 /**
- * POST /api/booking/phone/send — step 1. 429 RATE_LIMITED / OTP_COOLDOWN, 502 OTP_SEND_FAILED.
- * Mobile number only: the same path for new and returning people. The server never reveals
- * whether an account exists before the OTP is verified.
+ * POST /api/booking/email/send — step 1. 429 RATE_LIMITED / OTP_COOLDOWN, 502 OTP_SEND_FAILED.
+ * mode "book": name + email + phone. mode "login": email only. Never reveals whether an account exists.
  */
-export type SendCodeRequest = { country: string; phone: string };
+export type SendEmailCodeRequest = {
+  mode?: "book" | "login";
+  fullName?: string;
+  email: string;
+  country?: string;
+  phone?: string;
+};
 export type SendCodeResponse = { sentTo: string; resendAvailableAt: string };
 
-/**
- * POST /api/booking/phone/verify → SessionResponse. 400 OTP_INVALID.
- * On success the phone is verified, the account is created or loaded (session.account is set)
- * and the customer cookie is issued. Name and email are asked later, on /account.
- */
+/** POST /api/booking/email/verify { code } → SessionResponse. 400 OTP_INVALID. Logs in when the account exists. */
 export type VerifyCodeRequest = { code: string };
+
+/** POST /api/booking/details { fullName, country, phone } → SessionResponse. After "Log in" with a new email. */
+export type DetailsRequest = { fullName: string; country: string; phone: string };
 
 /** PUT /api/booking/contact — optional (not used by the current flow) → SessionResponse. */
 export type SaveContactRequest = { fullName: string; email: string; marketingConsent?: boolean };
@@ -111,8 +117,8 @@ export type RescheduleBookingRequest = { token: string; start: string; timeZone:
 
 // ---------------------------------------------------------------- customer account (cookie: css_customer)
 
-/** PUT /api/account/profile — optional name + email after booking → AccountResponse. */
-export type ProfileRequest = { fullName?: string; email?: string };
+/** PUT /api/account/profile — name change → AccountResponse. The email can't be changed here. */
+export type ProfileRequest = { fullName?: string };
 
 /** GET /api/account → 401 UNAUTHORIZED when logged out. */
 export type AccountResponse = {
@@ -128,6 +134,9 @@ export type PlanView = {
   amountInr: number;
   validFrom: string;
   validUntil: string;
+  /** "22 Jan 2027" in the coach's time zone. */
+  validFromLabel: string;
+  validUntilLabel: string;
   status: "upcoming" | "active" | "expiring" | "expired";
 };
 

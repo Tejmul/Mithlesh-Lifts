@@ -32,7 +32,8 @@ describe("admin auth", () => {
     const admin = await createAdmin();
     const { token, expiresAt } = await authenticate("  Coach@Example.com ", PASSWORD, "1.1.1.1");
     expect(token.length).toBeGreaterThan(30);
-    expect(expiresAt.getTime() - Date.now()).toBeGreaterThan(6.9 * 86_400_000);
+    expect(expiresAt.getTime() - Date.now()).toBeGreaterThan(23.9 * 3_600_000);
+    expect(expiresAt.getTime() - Date.now()).toBeLessThanOrEqual(24 * 3_600_000);
 
     const sessions = await db.adminSession.findMany();
     expect(sessions).toHaveLength(1);
@@ -53,11 +54,13 @@ describe("admin auth", () => {
     expect(await db.adminSession.count()).toBe(0);
   });
 
-  it("locks an email out after 5 attempts, even with the right password", async () => {
+  it("only failed passwords count towards the email lock (10), so the real admin isn't locked out by successes", async () => {
     await createAdmin();
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < 6; i++) await authenticate(EMAIL, PASSWORD, `10.1.0.${i}`); // successes never lock
+    for (let i = 0; i < 10; i++) {
       await expectApiError(authenticate(EMAIL, `wrong-${i}-password`, `10.0.0.${i}`), 401, "UNAUTHORIZED");
     }
+    // After 10 failures even the right password waits out the window (stops slow guessing).
     await expectApiError(authenticate(EMAIL, PASSWORD, "10.0.0.99"), 429, "RATE_LIMITED");
   });
 
@@ -79,11 +82,11 @@ describe("admin auth", () => {
     expect(await db.adminSession.count()).toBe(0);
   });
 
-  it("rejects sessions once the clock passes the 7-day expiry", async () => {
+  it("rejects sessions once the clock passes the 24-hour expiry", async () => {
     await createAdmin();
     const { token } = await authenticate(EMAIL, PASSWORD, "1.1.1.1");
-    expect(await resolveSession(token, new Date(Date.now() + 6 * 86_400_000))).not.toBeNull();
-    expect(await resolveSession(token, new Date(Date.now() + 8 * 86_400_000))).toBeNull();
+    expect(await resolveSession(token, new Date(Date.now() + 23 * 3_600_000))).not.toBeNull();
+    expect(await resolveSession(token, new Date(Date.now() + 25 * 3_600_000))).toBeNull();
   });
 
   it("logout (revokeSession) invalidates the token", async () => {

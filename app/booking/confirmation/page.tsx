@@ -44,7 +44,7 @@ function ConfirmationSkeleton() {
 
 async function Confirmation() {
   // Booking logs the customer in; their account page is the confirmation (docs/FLOW.md ③).
-  if (await getCurrentCustomer()) redirect("/account?booked=1");
+  if (await getCurrentCustomer()) redirect("/account");
   const session = await getSessionFromCookies();
   const record = session?.bookingId
     ? await db.booking.findUnique({ where: { id: session.bookingId }, include: { lead: true } })

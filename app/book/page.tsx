@@ -47,7 +47,7 @@ export default function BookPage() {
             What happens on the call
           </h2>
           <ul className="tick-list">
-            <li>Our team calls you on your verified number at the time you pick.</li>
+            <li>Our team calls you on the number you give, at the time you pick.</li>
             <li>They ask about your goal, current routine and what&apos;s been getting in the way.</li>
             <li>They recommend the right coaching plan and send you a personalised quote afterwards.</li>
             <li>You decide after. No obligation.</li>

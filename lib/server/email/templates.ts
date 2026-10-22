@@ -149,7 +149,7 @@ function customerRows(i: CustomerEmailInput): Row[] {
     ["When", formatWhen(i.start, i.customerTimeZone)],
     ["Length", `${i.callMinutes} minutes`],
     ["Reference", i.reference],
-    meeting ? ["Join link", meeting, meeting] : ["How", "Our sales team will call you on your verified number at this time."],
+    meeting ? ["Join link", meeting, meeting] : ["How", "Our sales team will call you on the number you gave at this time."],
   ];
 }
 
@@ -288,5 +288,22 @@ export function teamBookingChanged(i: TeamChangeEmailInput): RenderedEmail {
     ],
     rows: teamRows(i),
     footer: ["Internal notification."],
+  });
+}
+
+// ---------------------------------------------------------------- sign-in code
+
+/** The 6-digit code that verifies the visitor's email on /book (docs/FLOW.md ①). */
+export function verificationCode(i: { name: string | null; code: string; minutes: number }): RenderedEmail {
+  return render({
+    subject: `${i.code} is your mithilesh_lifts code`,
+    preheader: `Your code is ${i.code}. It expires in ${i.minutes} minutes.`,
+    heading: `Your code: ${i.code}`,
+    intro: [
+      `Hi ${i.name ? firstName(i.name) : "there"},`,
+      `Enter this code on the booking page to confirm your email. It expires in ${i.minutes} minutes.`,
+    ],
+    rows: [["Code", i.code]],
+    footer: ["Didn't ask for this? You can ignore this email. Never share this code with anyone."],
   });
 }

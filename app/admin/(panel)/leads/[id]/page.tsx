@@ -60,8 +60,8 @@ export default async function LeadDetailPage({ params }: PageProps<"/admin/leads
             <dd>{lead.fullName ?? <span className="adm-muted">No name yet</span>}</dd>
             <dt>Email</dt>
             <dd>{lead.email ? <a href={`mailto:${lead.email}`}>{lead.email}</a> : <span className="adm-muted">—</span>}</dd>
-            <dt>Phone verified</dt>
-            <dd>{fmtDateTime(lead.phoneVerifiedAt, tz)}</dd>
+            <dt>Email verified</dt>
+            <dd>{fmtDateTime(lead.emailVerifiedAt, tz)}</dd>
             <dt>Last login</dt>
             <dd>{fmtDateTime(lead.lastLoginAt, tz)}</dd>
             <dt>Lead source</dt>

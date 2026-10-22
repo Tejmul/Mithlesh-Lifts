@@ -50,6 +50,8 @@ export async function completeQuotePayment(
   });
   if (res.count !== 1) return false;
 
+  // One payment at a time per client, so two renewals paid together stack instead of overlapping.
+  await tx.$queryRaw`SELECT "id" FROM "Lead" WHERE "id" = ${quote.leadId} FOR UPDATE`;
   const settings = await tx.settings.upsert({ where: { id: 1 }, update: {}, create: { id: 1 } });
   const current = await tx.membership.findFirst({
     where: { leadId: quote.leadId, validUntil: { gt: input.paidAt } },
@@ -57,7 +59,15 @@ export async function completeQuotePayment(
   });
   const validFrom = current ? current.validUntil : input.paidAt;
   // Quotes sent before plan lengths existed default to one month; the admin can edit the dates.
-  const validUntil = addDuration(validFrom, quote.durationCount ?? 1, quote.durationUnit ?? "MONTH", settings.coachTimeZone);
+  // "Valid until 22 Jan" means the whole of 22 Jan (coach's time zone), same as an admin date edit.
+  // A stacked renewal starts right after the previous plan ends, so its first day isn't lost.
+  const validUntil = DateTime.fromJSDate(
+    addDuration(validFrom, quote.durationCount ?? 1, quote.durationUnit ?? "MONTH", settings.coachTimeZone),
+    { zone: settings.coachTimeZone },
+  )
+    .minus({ days: current ? 0 : 1 })
+    .endOf("day")
+    .toJSDate();
 
   await tx.membership.create({
     data: {
@@ -110,9 +120,14 @@ export async function updateMembership(input: {
   validUntil: Date;
   notes?: string;
 }): Promise<Membership> {
+  if (Number.isNaN(input.validFrom.getTime()) || Number.isNaN(input.validUntil.getTime())) {
+    throw new ApiException(422, "VALIDATION", "Some details need fixing.", { validFrom: "Pick valid dates." });
+  }
   if (input.validUntil.getTime() <= input.validFrom.getTime()) {
     throw new ApiException(422, "VALIDATION", "Some details need fixing.", { validUntil: "End date must be after the start date." });
   }
+  const exists = await db.membership.findUnique({ where: { id: input.id }, select: { id: true } });
+  if (!exists) throw new ApiException(404, "NOT_FOUND", "This plan no longer exists. Refresh the page.");
   return db.membership.update({
     where: { id: input.id },
     data: { validFrom: input.validFrom, validUntil: input.validUntil, notes: input.notes?.trim() || null },
@@ -128,12 +143,16 @@ export async function currentMembershipForLead(leadId: string, now: Date = new D
   return live ?? db.membership.findFirst({ where: { leadId }, orderBy: { validUntil: "desc" } });
 }
 
-export function toPlanView(m: Membership, now: Date = new Date()): PlanView {
+/** Dates are formatted on the server in the coach's time zone, so every viewer sees the same day. */
+export function toPlanView(m: Membership, timeZone: string, now: Date = new Date()): PlanView {
+  const day = (d: Date) => DateTime.fromJSDate(d, { zone: timeZone }).toFormat("d LLL yyyy");
   return {
     planName: m.planName,
     amountInr: m.amountInr,
     validFrom: m.validFrom.toISOString(),
     validUntil: m.validUntil.toISOString(),
+    validFromLabel: day(m.validFrom),
+    validUntilLabel: day(m.validUntil),
     status: membershipStatus(m, now),
   };
 }

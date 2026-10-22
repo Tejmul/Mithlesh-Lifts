@@ -1,12 +1,12 @@
 /** Idempotent seed: settings row + placeholder weekly hours. Run with `npm run db:seed`. No admin user here. */
 import "dotenv/config";
-import { PrismaPg } from "@prisma/adapter-pg";
+import { pgAdapter } from "../scripts/pg-adapter";
 import { PrismaClient } from "../generated/prisma/client";
 
 async function main() {
   const connectionString = process.env.DATABASE_URL;
   if (!connectionString) throw new Error("DATABASE_URL is not set");
-  const db = new PrismaClient({ adapter: new PrismaPg({ connectionString }) });
+  const db = new PrismaClient({ adapter: pgAdapter(connectionString) });
   try {
     await db.settings.upsert({ where: { id: 1 }, update: {}, create: { id: 1 } });
 

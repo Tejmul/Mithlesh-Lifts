@@ -61,6 +61,19 @@ export default async function ClientsPage({ searchParams }: PageProps<"/admin/cl
     if (digits.length >= 3) or.push({ phoneE164: { contains: digits } });
     and.push({ OR: [{ lead: { OR: or } }, { planName: { contains: q, mode: "insensitive" } }] });
   }
+  if (show === "expiring" || show === "expired") {
+    // Only each client's latest plan: someone who already renewed isn't "ending" or "expired".
+    const latest = await db.membership.groupBy({ by: ["leadId"], _max: { validUntil: true } });
+    const latestRows = await db.membership.findMany({
+      where: {
+        OR: latest
+          .filter((l) => l._max.validUntil)
+          .map((l) => ({ leadId: l.leadId, validUntil: l._max.validUntil! })),
+      },
+      select: { id: true },
+    });
+    and.push({ id: { in: latestRows.map((r) => r.id) } });
+  }
   const where: Prisma.MembershipWhereInput = { AND: and };
 
   const [total, rows, totals] = await Promise.all([

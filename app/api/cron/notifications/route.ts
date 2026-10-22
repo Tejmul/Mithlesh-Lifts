@@ -16,19 +16,20 @@ export const GET = handler(async (request: Request) => {
   const auth = request.headers.get("authorization") ?? "";
   if (!safeEqual(auth, `Bearer ${secret}`)) return apiError(401, "UNAUTHORIZED", "Not authorized.");
 
-  const notifications = await processDueNotifications({ limit: 100 });
+  // maxDuration is 60s: stop sending at 40s so cleanup below still runs and nothing is cut mid-send.
+  const notifications = await processDueNotifications({ limit: 100, budgetMs: 40_000 });
   await pruneRateLimits();
   const now = new Date();
   // Expired sessions that never verified a phone carry nothing useful.
   const unverified = await db.bookingSession.deleteMany({
-    where: { expiresAt: { lt: now }, bookingId: null, phoneVerifiedAt: null },
+    where: { expiresAt: { lt: now }, bookingId: null, emailVerifiedAt: null },
   });
   // Verified-but-unbooked sessions are sales follow-up leads (admin); keep them 180 days, then minimise.
   const staleLeads = await db.bookingSession.deleteMany({
     where: {
       expiresAt: { lt: now },
       bookingId: null,
-      phoneVerifiedAt: { not: null },
+      emailVerifiedAt: { not: null },
       createdAt: { lt: new Date(now.getTime() - 180 * 86_400_000) },
     },
   });

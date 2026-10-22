@@ -3,6 +3,7 @@ import type { BookingResponse } from "@/lib/shared/api";
 import { isoDateTimeSchema, timeZoneSchema } from "@/lib/shared/validation";
 import { getBookingByManageToken, rescheduleBooking, toBookingView } from "@/lib/server/bookings/service";
 import { ApiException, apiOk, assertSameOrigin, clientIp, handler, parseBody } from "@/lib/server/http";
+import { hashToken } from "@/lib/server/crypto";
 import { enforceRateLimit } from "@/lib/server/rate-limit";
 
 const rescheduleSchema = z.object({
@@ -14,7 +15,7 @@ const rescheduleSchema = z.object({
 /** POST /api/booking/manage/reschedule — token-authenticated → BookingResponse (fresh manageUrl). */
 export const POST = handler(async (request: Request) => {
   assertSameOrigin(request);
-  await enforceRateLimit(`booking-manage:ip:${clientIp(request)}`, 20, 3600);
+  await enforceRateLimit(`booking-manage:ip:${hashToken(clientIp(request))}`, 200, 3600);
   const body = await parseBody(request, rescheduleSchema);
 
   const booking = await getBookingByManageToken(body.token);

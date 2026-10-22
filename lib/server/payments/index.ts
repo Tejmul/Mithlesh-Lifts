@@ -7,7 +7,7 @@ import { env } from "../env";
 import { ApiException } from "../http";
 import { completeQuotePayment } from "../memberships";
 import { logEvent, reportError } from "../observability";
-import { getQuoteForLead, toQuoteView } from "../quotes";
+import { formatInr, getQuoteForLead, toQuoteView } from "../quotes";
 import { createRazorpayOrder, verifyCheckoutSignature, verifyWebhookSignature } from "./razorpay";
 
 const BRAND = "mithilesh_lifts";
@@ -84,20 +84,31 @@ export async function createCheckout(input: { quoteId: string; leadId: string })
   };
 }
 
+type PaidOutcome = "paid" | "already_paid" | "duplicate" | "inactive_quote";
+
 /**
  * Idempotent: marks the Payment PAID and its Quote PAID (only from SENT), starts the membership and
  * adds the "payment_received" inbox item exactly once, even if checkout verify and webhook race.
+ * Money that arrives for a quote that is already paid (a second order, or the admin marked it paid
+ * by UPI meanwhile) or no longer open (cancelled) is flagged: reported, shown on the admin quote,
+ * and the customer is told it will be refunded or activated.
  */
-async function markPaymentPaid(paymentId: string, providerPaymentId: string): Promise<void> {
+async function markPaymentPaid(paymentId: string, providerPaymentId: string): Promise<PaidOutcome> {
   const outcome = await db.$transaction(async (tx) => {
     const now = new Date();
     const payment = await tx.payment.findUniqueOrThrow({ where: { id: paymentId }, include: { quote: true } });
-    if (payment.status !== "PAID") {
-      await tx.payment.updateMany({
-        where: { id: payment.id, status: { not: "PAID" } },
-        data: { status: "PAID", providerPaymentId, paidAt: now },
-      });
+    if (payment.status === "PAID" && payment.providerPaymentId && payment.providerPaymentId !== providerPaymentId) {
+      // A second capture on the same order (paid twice in one checkout).
+      return "duplicate" as const;
     }
+    const flipped =
+      payment.status !== "PAID" &&
+      (
+        await tx.payment.updateMany({
+          where: { id: payment.id, status: { not: "PAID" } },
+          data: { status: "PAID", providerPaymentId, paidAt: now },
+        })
+      ).count === 1;
     const started = await completeQuotePayment(tx, payment.quote, {
       amountInr: payment.amountInr,
       paidVia: "razorpay",
@@ -105,14 +116,26 @@ async function markPaymentPaid(paymentId: string, providerPaymentId: string): Pr
     });
     if (started) return "paid" as const;
     const current = await tx.quote.findUniqueOrThrow({ where: { id: payment.quoteId }, select: { status: true } });
-    return current.status === "PAID" ? ("already_paid" as const) : ("inactive_quote" as const);
+    if (current.status !== "PAID") return "inactive_quote" as const;
+    // Quote already paid: by this same payment earlier (fine) or by another payment (money taken twice).
+    return flipped ? ("duplicate" as const) : ("already_paid" as const);
   }, TX_OPTIONS);
 
   if (outcome === "paid") logEvent("payment.paid", { paymentId });
   if (outcome === "inactive_quote") {
-    // Money was captured for a cancelled quote: needs a manual refund / follow-up.
-    reportError(new Error("Payment captured for a quote that is not open"), { where: "payments.markPaid", paymentId });
+    reportError(new Error("Payment captured for a quote that is not open: refund or activate"), {
+      where: "payments.markPaid",
+      paymentId,
+    });
   }
+  if (outcome === "duplicate") {
+    reportError(new Error("Second payment captured for an already-paid quote: refund the extra"), {
+      where: "payments.markPaid",
+      paymentId,
+      providerPaymentId,
+    });
+  }
+  return outcome;
 }
 
 /** Verifies the checkout signature, marks Payment + Quote PAID idempotently, adds a "payment_received" inbox item. */
@@ -136,7 +159,16 @@ export async function verifyRazorpayPayment(input: {
     throw new ApiException(404, "NOT_FOUND", "Quote not found.");
   }
 
-  await markPaymentPaid(payment.id, input.paymentId);
+  const outcome = await markPaymentPaid(payment.id, input.paymentId);
+  if (outcome === "inactive_quote" || outcome === "duplicate") {
+    throw new ApiException(
+      409,
+      "BAD_REQUEST",
+      outcome === "duplicate"
+        ? `We received your payment of ${formatInr(payment.amountInr)}, but this plan was already paid. Our team will refund the extra payment. You don't need to do anything. Payment ID: ${input.paymentId}`
+        : `We received your payment of ${formatInr(payment.amountInr)}, but this quote is no longer active. Our team will contact you to refund it or activate your plan. Payment ID: ${input.paymentId}`,
+    );
+  }
   const fresh = await db.quote.findUniqueOrThrow({ where: { id: quote.id } });
   return toQuoteView(fresh);
 }

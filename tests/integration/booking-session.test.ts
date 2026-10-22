@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-// Verifying a number logs the customer in, which sets a cookie: stand in for next/headers.
+// Verifying an email logs the customer in, which sets a cookie: stand in for next/headers.
 const jar = vi.hoisted(() => new Map<string, string>());
 vi.mock("next/headers", () => ({
   cookies: async () => ({
@@ -16,20 +16,20 @@ import { db } from "@/lib/server/db";
 import { clearOutbox, readOutbox } from "@/lib/server/dev-outbox";
 import { resetEnvCache } from "@/lib/server/env";
 import { ApiException } from "@/lib/server/http";
-import { saveContact, sendPhoneCode, verifyPhoneCode } from "@/lib/server/phone-verify/flow";
-import { resetMockPhoneVerify } from "@/lib/server/phone-verify/mock";
+import { CUSTOMER_COOKIE } from "@/lib/server/customer-auth";
+import { completeDetails, sendEmailCode, verifyEmailCode } from "@/lib/server/email-verify/flow";
 import { resetDb } from "../helpers/db";
 
-const IN = { country: "IN", phone: "98765 43210" };
+const EMAIL = "asha@example.com";
+const EMAIL2 = "ravi@example.com";
 const IN_E164 = "+919876543210";
-const IN2 = { country: "IN", phone: "91234 56789" };
-const IN2_E164 = "+919123456789";
+const BOOK = { fullName: "Asha Rao", email: EMAIL, country: "IN", phone: "98765 43210" };
 const IP = "203.0.113.7";
 const T0 = new Date("2030-01-07T10:00:00.000Z"); // aligned to an hour boundary
 
 function codeFor(to: string) {
-  const body = readOutbox({ to, channel: "sms" }).at(-1)?.body;
-  const m = body?.match(/(\d{6})$/);
+  const subject = readOutbox({ to, channel: "email" }).at(-1)?.subject;
+  const m = subject?.match(/^(\d{6}) /);
   if (!m) throw new Error("no code");
   return m[1]!;
 }
@@ -52,16 +52,15 @@ async function newSession(tracking = {}) {
   return (await startSession(undefined, tracking)).session;
 }
 
-async function verify(session: BookingSession, phone = IN, e164 = IN_E164) {
-  await sendPhoneCode(session, phone, IP);
-  return verifyPhoneCode(await fresh(session), codeFor(e164), IP);
+async function verify(session: BookingSession, input: Parameters<typeof sendEmailCode>[1] = BOOK) {
+  await sendEmailCode(session, input, IP);
+  return verifyEmailCode(await fresh(session), codeFor(input.email), IP);
 }
 
 beforeEach(async () => {
   jar.clear();
   await resetDb();
   clearOutbox();
-  resetMockPhoneVerify();
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(T0);
 });
@@ -119,9 +118,9 @@ describe("session lifecycle", () => {
     const session = await newSession();
     const view = await toSessionView(session);
     expect(view).toEqual({
-      pendingPhoneE164: null,
+      pendingEmail: null,
       phoneE164: null,
-      phoneVerified: false,
+      verified: false,
       fullName: null,
       email: null,
       callMinutes: 30,
@@ -132,7 +131,7 @@ describe("session lifecycle", () => {
     });
 
     const lead = await db.lead.create({
-      data: { fullName: "A B", phoneE164: IN_E164, phoneVerifiedAt: new Date(), email: "a@b.co" },
+      data: { fullName: "A B", phoneE164: IN_E164, emailVerifiedAt: new Date(), email: "a@b.co" },
     });
     const start = new Date(T0.getTime() + 86_400_000);
     const booking = await db.booking.create({
@@ -148,141 +147,158 @@ describe("session lifecycle", () => {
     });
     await db.$transaction((tx) => attachBookingToSession(tx, session.id, booking.id));
     expect((await toSessionView(await fresh(session))).bookingReference).toBe("CSS-TEST22");
-    await expectApiError(sendPhoneCode(await fresh(session), IN, IP), 409, "ALREADY_BOOKED");
+    // A booked session can still sign in (e.g. the login cookie expired): booking is what's blocked.
+    await sendEmailCode(await fresh(session), BOOK, IP);
+  });
+
+  it("a cancelled or past call releases the session, so the same browser can book again", async () => {
+    const { session, token } = await startSession(undefined, {});
+    const lead = await db.lead.create({ data: { phoneE164: IN_E164, email: EMAIL, emailVerifiedAt: new Date() } });
+    const start = new Date(T0.getTime() + 2 * 3_600_000);
+    const booking = await db.booking.create({
+      data: {
+        reference: "CSS-REBOOK",
+        leadId: lead.id,
+        startsAt: start,
+        endsAt: new Date(start.getTime() + 30 * 60_000),
+        blockedUntil: new Date(start.getTime() + 45 * 60_000),
+        customerTimeZone: "Asia/Kolkata",
+        idempotencyKey: "rebook-1",
+      },
+    });
+    await db.$transaction((tx) => attachBookingToSession(tx, session.id, booking.id));
+    expect((await findLiveSession(token))?.bookingId).toBe(booking.id); // still upcoming → kept
+
+    await db.booking.update({ where: { id: booking.id }, data: { status: "CANCELLED" } });
+    const released = await findLiveSession(token);
+    expect(released?.bookingId).toBeNull();
+    expect((await toSessionView(released!)).bookingReference).toBeNull();
+
+    // Same for a confirmed call that is now in the past.
+    await db.booking.update({ where: { id: booking.id }, data: { status: "CONFIRMED" } });
+    await db.$transaction((tx) => attachBookingToSession(tx, session.id, booking.id));
+    advance(3 * 3_600_000); // call time has passed; the session itself is still live
+    expect((await findLiveSession(token))?.bookingId).toBeNull();
   });
 });
 
-describe("phone OTP flow", () => {
-  it("send → verify marks the phone verified", async () => {
-    const session = await newSession();
-    const res = await sendPhoneCode(session, IN, IP);
-    expect(res.sentTo).toBe("+9198••••210");
-    expect(new Date(res.resendAvailableAt).getTime()).toBe(T0.getTime() + 45_000);
+describe("email code flow", () => {
+  it("send → verify confirms the email, creates the account and logs in", async () => {
+    const session = await newSession({ source: "manychat", campaign: "fit" });
+    const res = await sendEmailCode(session, BOOK, IP);
+    expect(res.sentTo).toBe("as••@example.com");
+    const mail = readOutbox({ to: EMAIL, channel: "email" }).at(-1)!;
+    expect(mail.subject).toMatch(/^\d{6} is your mithilesh_lifts code$/);
+    expect(mail.body).toContain("Hi Asha");
+    const stored = await fresh(session);
+    expect(stored.emailCodeHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(stored.emailCodeHash).not.toContain(codeFor(EMAIL));
 
-    const pending = await fresh(session);
-    expect(pending.pendingPhoneE164).toBe(IN_E164);
-    expect(pending.phoneVerifiedAt).toBeNull();
-
-    const verified = await verifyPhoneCode(pending, codeFor(IN_E164), IP);
-    expect(verified.phoneE164).toBe(IN_E164);
-    expect(verified.phoneVerifiedAt).not.toBeNull();
-    expect((await toSessionView(verified)).phoneVerified).toBe(true);
+    const verified = await verifyEmailCode(stored, codeFor(EMAIL), IP);
+    expect(verified).toMatchObject({ email: EMAIL, phoneE164: IN_E164, fullName: "Asha Rao", emailCodeHash: null });
+    expect(verified.emailVerifiedAt).not.toBeNull();
+    const lead = await db.lead.findUniqueOrThrow({ where: { email: EMAIL } });
+    expect(lead).toMatchObject({ fullName: "Asha Rao", phoneE164: IN_E164, source: "manychat", campaign: "fit" });
+    expect(lead.clientCode).toMatch(/^ASHA-\d{4}$/);
+    expect(jar.has(CUSTOMER_COOKIE)).toBe(true);
+    const view = await toSessionView(verified);
+    expect(view).toMatchObject({ verified: true, email: EMAIL });
   });
 
-  it("wrong code → OTP_INVALID and nothing verified", async () => {
+  it("book mode needs a valid phone", async () => {
+    const err = await expectApiError(sendEmailCode(await newSession(), { ...BOOK, phone: "12345" }, IP), 422, "VALIDATION");
+    expect(err.fields?.phone).toBeTruthy();
+  });
+
+  it("wrong code → OTP_INVALID; 5 wrong tries burn the code", async () => {
     const session = await newSession();
-    await sendPhoneCode(session, IN, IP);
-    const code = codeFor(IN_E164);
-    const bad = String((Number(code) + 1) % 1_000_000).padStart(6, "0");
-    await expectApiError(verifyPhoneCode(await fresh(session), bad, IP), 400, "OTP_INVALID");
-    expect((await fresh(session)).phoneVerifiedAt).toBeNull();
+    await sendEmailCode(session, BOOK, IP);
+    const good = codeFor(EMAIL);
+    const bad = good === "000000" ? "111111" : "000000";
+    for (let i = 0; i < 5; i++) await expectApiError(verifyEmailCode(await fresh(session), bad, IP), 400, "OTP_INVALID");
+    await expectApiError(verifyEmailCode(await fresh(session), good, IP), 400, "OTP_INVALID");
+    expect((await fresh(session)).emailVerifiedAt).toBeNull();
+  });
+
+  it("codes expire after 10 minutes", async () => {
+    const session = await newSession();
+    await sendEmailCode(session, BOOK, IP);
+    advance(10 * 60_000 + 1);
+    await expectApiError(verifyEmailCode(await fresh(session), codeFor(EMAIL), IP), 400, "OTP_INVALID");
   });
 
   it("verify without a sent code → OTP_INVALID", async () => {
-    await expectApiError(verifyPhoneCode(await newSession(), "123456", IP), 400, "OTP_INVALID");
+    await expectApiError(verifyEmailCode(await newSession(), "123456", IP), 400, "OTP_INVALID");
   });
 
   it("enforces the resend cooldown", async () => {
     const session = await newSession();
-    await sendPhoneCode(session, IN, IP);
-    advance(10_000);
-    const err = await expectApiError(sendPhoneCode(await fresh(session), IN, IP), 429, "OTP_COOLDOWN");
-    expect(err.fields?.resendAvailableAt).toBe(new Date(T0.getTime() + 45_000).toISOString());
-    advance(36_000);
-    await expect(sendPhoneCode(await fresh(session), IN, IP)).resolves.toBeTruthy();
-  });
-
-  it("rate limits per phone (5/hour across sessions)", async () => {
-    for (let i = 0; i < 5; i++) {
-      await sendPhoneCode(await newSession(), IN, `198.51.100.${i}`);
-    }
-    await expectApiError(sendPhoneCode(await newSession(), IN, "198.51.100.99"), 429, "RATE_LIMITED");
-  });
-
-  it("rate limits per session (8/hour)", async () => {
-    const session = await newSession();
-    for (let i = 0; i < 8; i++) {
-      await sendPhoneCode(await fresh(session), i % 2 ? IN : IN2, IP);
-      advance(46_000);
-    }
-    await expectApiError(sendPhoneCode(await fresh(session), IN2, IP), 429, "RATE_LIMITED");
-  });
-
-  it("rate limits per IP (15/hour)", async () => {
-    const phones = ["98765 43210", "91234 56789", "99887 76655", "90000 11111"];
-    for (let i = 0; i < 15; i++) {
-      await sendPhoneCode(await newSession(), { country: "IN", phone: phones[i % 4]! }, IP);
-    }
-    await expectApiError(sendPhoneCode(await newSession(), { country: "IN", phone: "93333 22222" }, IP), 429, "RATE_LIMITED");
-  });
-
-  it("rate limits verify attempts per session (10/15min)", async () => {
-    const session = await newSession();
-    await sendPhoneCode(session, IN, IP);
-    const s = await fresh(session);
-    const code = codeFor(IN_E164);
-    const bad = String((Number(code) + 1) % 1_000_000).padStart(6, "0");
-    for (let i = 0; i < 10; i++) await expectApiError(verifyPhoneCode(s, bad, IP), 400, "OTP_INVALID");
-    await expectApiError(verifyPhoneCode(s, code, IP), 429, "RATE_LIMITED");
-  });
-
-  it("changing the number resets verification", async () => {
-    const session = await newSession();
-    await verify(session);
+    await sendEmailCode(session, BOOK, IP);
+    await expectApiError(sendEmailCode(await fresh(session), BOOK, IP), 429, "OTP_COOLDOWN");
     advance(46_000);
-    await sendPhoneCode(await fresh(session), IN2, IP);
-    const s = await fresh(session);
-    expect(s).toMatchObject({ pendingPhoneE164: IN2_E164, phoneE164: null, phoneVerifiedAt: null });
-    await expectApiError(saveContact(s, { fullName: "Asha Rao", email: "asha@example.com" }), 403, "PHONE_NOT_VERIFIED");
-    const v = await verifyPhoneCode(s, codeFor(IN2_E164), IP);
-    expect(v.phoneE164).toBe(IN2_E164);
+    await sendEmailCode(await fresh(session), BOOK, IP);
+    // Only the newest code works.
+    expect(readOutbox({ to: EMAIL, channel: "email" })).toHaveLength(2);
   });
 
-  it("resending to the same verified number keeps it verified", async () => {
+  it("rate limits per email (5/hour across sessions)", async () => {
+    for (let i = 0; i < 5; i++) await sendEmailCode(await newSession(), BOOK, `198.51.100.${i}`);
+    await expectApiError(sendEmailCode(await newSession(), BOOK, "198.51.100.99"), 429, "RATE_LIMITED");
+  });
+
+  it("rate limits per IP (100/hour: high, because mobile networks share IPs)", async () => {
+    for (let i = 0; i < 100; i++) {
+      await sendEmailCode(await newSession(), { ...BOOK, email: `p${i}@example.com` }, IP);
+    }
+    await expectApiError(sendEmailCode(await newSession(), { ...BOOK, email: "p999@example.com" }, IP), 429, "RATE_LIMITED");
+  }, 60_000);
+
+  it("a code sent to one email cannot verify another", async () => {
     const session = await newSession();
-    await verify(session);
+    await sendEmailCode(session, BOOK, IP);
+    const first = codeFor(EMAIL);
     advance(46_000);
-    await sendPhoneCode(await fresh(session), IN, IP);
-    expect((await fresh(session)).phoneVerifiedAt).not.toBeNull();
+    await sendEmailCode(await fresh(session), { ...BOOK, email: EMAIL2 }, IP);
+    await expectApiError(verifyEmailCode(await fresh(session), first, IP), 400, "OTP_INVALID");
+    await verifyEmailCode(await fresh(session), codeFor(EMAIL2), IP);
+    expect((await fresh(session)).email).toBe(EMAIL2);
   });
 
-  it("a code sent to one number cannot verify another", async () => {
+  it("a returning email keeps its account; the new number replaces the old one", async () => {
+    await db.lead.create({
+      data: { email: EMAIL, fullName: "Asha R", clientCode: "ASHA-1234", phoneE164: "+919000000000" },
+    });
+    const verified = await verify(await newSession(), { ...BOOK, fullName: "Someone Else" });
+    const lead = await db.lead.findUniqueOrThrow({ where: { email: EMAIL } });
+    expect(lead).toMatchObject({ fullName: "Asha R", clientCode: "ASHA-1234", phoneE164: IN_E164 });
+    expect(verified.fullName).toBe("Asha R");
+    expect(await db.lead.count()).toBe(1);
+  });
+
+  it("log in with a new email: verified but no account until name + phone are given", async () => {
     const session = await newSession();
-    await sendPhoneCode(session, IN, IP);
-    const codeA = codeFor(IN_E164);
-    advance(46_000);
-    await sendPhoneCode(await fresh(session), IN2, IP);
-    await expectApiError(verifyPhoneCode(await fresh(session), codeA, IP), 400, "OTP_INVALID");
+    const verified = await verify(session, { email: EMAIL });
+    expect(jar.has(CUSTOMER_COOKIE)).toBe(false);
+    expect(await db.lead.count()).toBe(0);
+    expect(await toSessionView(verified)).toMatchObject({ verified: true, account: null });
+
+    const done = await completeDetails(verified, { fullName: "Asha Rao", country: "IN", phone: "98765 43210" });
+    expect(done).toMatchObject({ fullName: "Asha Rao", phoneE164: IN_E164 });
+    expect(await db.lead.findUniqueOrThrow({ where: { email: EMAIL } })).toMatchObject({ fullName: "Asha Rao" });
+    expect(jar.has(CUSTOMER_COOKIE)).toBe(true);
   });
 
-  it("provider failure → OTP_SEND_FAILED and the cooldown is released", async () => {
+  it("completeDetails requires a confirmed email", async () => {
+    await expectApiError(completeDetails(await newSession(), { fullName: "Asha Rao", country: "IN", phone: "98765 43210" }), 403, "NOT_VERIFIED");
+  });
+
+  it("email provider failure → OTP_SEND_FAILED and the cooldown is released", async () => {
+    const emailModule = await import("@/lib/server/email");
+    const spy = vi.spyOn(emailModule, "sendEmail").mockResolvedValueOnce({ ok: false, error: "boom", retryable: true });
     vi.spyOn(console, "error").mockImplementation(() => {});
-    process.env.PHONE_VERIFY_PROVIDER = "twilio_verify"; // no credentials configured
-    resetEnvCache();
     const session = await newSession();
-    const err = await expectApiError(sendPhoneCode(session, IN, IP), 502, "OTP_SEND_FAILED");
-    expect(err.message).toBe("We couldn't send the code. Check the number and try again.");
-    process.env.PHONE_VERIFY_PROVIDER = "mock";
-    resetEnvCache();
-    await expect(sendPhoneCode(await fresh(session), IN, IP)).resolves.toBeTruthy();
-    vi.mocked(console.error).mockRestore();
-  });
-});
-
-describe("contact step", () => {
-  it("requires a verified phone", async () => {
-    await expectApiError(
-      saveContact(await newSession(), { fullName: "Asha Rao", email: "asha@example.com" }),
-      403,
-      "PHONE_NOT_VERIFIED",
-    );
-  });
-
-  it("saves name, email and consent once verified", async () => {
-    const session = await verify(await newSession());
-    const s = await saveContact(session, { fullName: "Asha Rao", email: "asha@example.com", marketingConsent: true });
-    expect(s).toMatchObject({ fullName: "Asha Rao", email: "asha@example.com", marketingConsent: true });
-    const view = await toSessionView(s);
-    expect(view).toMatchObject({ phoneVerified: true, fullName: "Asha Rao", email: "asha@example.com" });
+    await expectApiError(sendEmailCode(session, BOOK, IP), 502, "OTP_SEND_FAILED");
+    spy.mockRestore();
+    await sendEmailCode(await fresh(session), BOOK, IP);
   });
 });

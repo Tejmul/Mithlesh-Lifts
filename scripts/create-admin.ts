@@ -9,7 +9,7 @@ import { randomBytes, scrypt } from "crypto";
 import { createInterface } from "readline";
 import { Writable } from "stream";
 import { promisify } from "util";
-import { PrismaPg } from "@prisma/adapter-pg";
+import { pgAdapter } from "./pg-adapter";
 import { PrismaClient } from "../generated/prisma/client";
 
 const scryptAsync = promisify(scrypt) as (pw: string, salt: Buffer, len: number) => Promise<Buffer>;
@@ -65,7 +65,7 @@ async function main() {
 
   const connectionString = process.env.DATABASE_URL;
   if (!connectionString) throw new Error("DATABASE_URL is not set");
-  const db = new PrismaClient({ adapter: new PrismaPg({ connectionString }) });
+  const db = new PrismaClient({ adapter: pgAdapter(connectionString) });
   try {
     const passwordHash = await hashPassword(password);
     const existing = await db.adminUser.findUnique({ where: { email } });

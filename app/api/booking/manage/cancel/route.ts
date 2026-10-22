@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { BookingResponse } from "@/lib/shared/api";
 import { cancelBooking, getBookingByManageToken, toBookingView } from "@/lib/server/bookings/service";
 import { ApiException, apiOk, assertSameOrigin, clientIp, handler, parseBody } from "@/lib/server/http";
+import { hashToken } from "@/lib/server/crypto";
 import { enforceRateLimit } from "@/lib/server/rate-limit";
 
 const cancelSchema = z.object({
@@ -12,7 +13,7 @@ const cancelSchema = z.object({
 /** POST /api/booking/manage/cancel — token-authenticated → BookingResponse */
 export const POST = handler(async (request: Request) => {
   assertSameOrigin(request);
-  await enforceRateLimit(`booking-manage:ip:${clientIp(request)}`, 20, 3600);
+  await enforceRateLimit(`booking-manage:ip:${hashToken(clientIp(request))}`, 200, 3600);
   const body = await parseBody(request, cancelSchema);
 
   const booking = await getBookingByManageToken(body.token);

@@ -33,13 +33,35 @@ function cookieOptions() {
 /** Loads the live session for a raw cookie token and slides its expiry. Null if missing/expired. */
 export async function findLiveSession(token: string | undefined | null): Promise<BookingSession | null> {
   if (!token || token.length > 200) return null;
-  const session = await db.bookingSession.findUnique({ where: { tokenHash: hashToken(token) } });
+  const found = await db.bookingSession.findUnique({ where: { tokenHash: hashToken(token) } });
   const now = Date.now();
-  if (!session || session.expiresAt.getTime() <= now) return null;
+  if (!found || found.expiresAt.getTime() <= now) return null;
+  const session = await releaseFinishedBooking(found, new Date(now));
   if (session.expiresAt.getTime() < now + SESSION_TTL_MS - SLIDE_THRESHOLD_MS) {
     return db.bookingSession.update({ where: { id: session.id }, data: { expiresAt: new Date(now + SESSION_TTL_MS) } });
   }
   return session;
+}
+
+/**
+ * A session stays "booked" only while its call is confirmed and still ahead. Once the call is
+ * cancelled, completed or past, the link is dropped so the same browser can book again
+ * (otherwise /book would bounce the customer to /account forever).
+ */
+async function releaseFinishedBooking(session: BookingSession, now: Date): Promise<BookingSession> {
+  if (!session.bookingId) return session;
+  const booking = await db.booking.findUnique({
+    where: { id: session.bookingId },
+    select: { status: true, startsAt: true },
+  });
+  if (booking && booking.status === "CONFIRMED" && booking.startsAt.getTime() > now.getTime()) return session;
+  return db.bookingSession.update({ where: { id: session.id }, data: { bookingId: null } });
+}
+
+/** Ends the /book session for this cookie (logout): the row can no longer be used, even if the token was copied. */
+export async function endSession(token: string | undefined | null): Promise<void> {
+  if (!token || token.length > 200) return;
+  await db.bookingSession.deleteMany({ where: { tokenHash: hashToken(token) } });
 }
 
 /**
@@ -117,15 +139,17 @@ export async function createOrResumeSession(tracking: Tracking): Promise<Booking
   return customer ? applyCustomerLogin(session, customer) : session;
 }
 
-/** A logged-in customer skips the OTP: an unverified session is marked verified with their phone. */
+/** A logged-in customer skips the code: the session takes their verified email and phone. */
 export async function applyCustomerLogin(session: BookingSession, customer: Lead): Promise<BookingSession> {
-  if (session.bookingId || (session.phoneVerifiedAt && session.phoneE164)) return session;
+  if (session.bookingId || (session.emailVerifiedAt && session.email)) return session;
+  if (!customer.email) return session; // pre-email accounts verify once like everyone else
   return db.bookingSession.update({
     where: { id: session.id },
     data: {
-      pendingPhoneE164: customer.phoneE164,
+      pendingEmail: customer.email,
+      email: customer.email,
+      emailVerifiedAt: new Date(),
       phoneE164: customer.phoneE164,
-      phoneVerifiedAt: new Date(),
       fullName: customer.fullName ?? session.fullName,
     },
   });
@@ -150,9 +174,9 @@ export async function toSessionView(session: BookingSession): Promise<BookingSes
     currentAccount(),
   ]);
   return {
-    pendingPhoneE164: session.pendingPhoneE164,
+    pendingEmail: session.pendingEmail,
     phoneE164: session.phoneE164,
-    phoneVerified: Boolean(session.phoneVerifiedAt && session.phoneE164),
+    verified: Boolean(session.emailVerifiedAt && session.email),
     fullName: session.fullName,
     email: session.email,
     callMinutes: settings.callMinutes,
@@ -164,9 +188,9 @@ export async function toSessionView(session: BookingSession): Promise<BookingSes
 }
 
 async function upcomingFor(session: BookingSession) {
-  if (!session.phoneVerifiedAt || !session.phoneE164) return null;
-  const { findUpcomingBookingForPhone, toBookingView } = await import("./bookings/service");
-  const upcoming = await findUpcomingBookingForPhone(session.phoneE164);
+  if (!session.emailVerifiedAt || !session.email) return null;
+  const { findUpcomingBookingForEmail, toBookingView } = await import("./bookings/service");
+  const upcoming = await findUpcomingBookingForEmail(session.email);
   return upcoming ? toBookingView(upcoming) : null;
 }
 

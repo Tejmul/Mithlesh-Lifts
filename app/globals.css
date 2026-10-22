@@ -1732,6 +1732,7 @@ textarea {
 }
 .book-main {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 28px;
 }
 .book-intro {
@@ -2152,8 +2153,12 @@ textarea {
 }
 .cal-day {
   position: relative;
+  justify-self: center;
+  width: 100%;
+  max-width: 46px;
   aspect-ratio: 1;
-  min-height: 40px;
+  min-width: 0;
+  padding: 0;
   border-radius: 12px;
   border: 1px solid transparent;
   background: transparent;
@@ -3315,5 +3320,255 @@ textarea {
   .cta-note {
     width: auto;
     text-align: left;
+  }
+}
+
+/* ---------------------------------------------------------------- calendar picker (booking + reschedule) */
+.cal {
+  container-type: inline-size;
+  gap: 18px;
+}
+.cal-type {
+  display: grid;
+  gap: 8px;
+}
+.cal-type label {
+  font-weight: 700;
+  font-size: 0.95rem;
+}
+.cal-type-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+.cal-type-row input {
+  width: 100%;
+  min-height: 52px;
+  padding: 0 16px;
+  border-radius: 14px;
+  border: 1px solid var(--line-2);
+  background: var(--bg);
+  color: var(--text);
+  font: 500 1rem/1 var(--body);
+}
+.cal-type-row input:focus-visible {
+  outline: 2px solid var(--gold);
+  outline-offset: 1px;
+  border-color: var(--gold);
+}
+.cal-type-row .btn {
+  min-height: 52px;
+}
+.cal-type-result {
+  display: grid;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: rgb(245 181 68 / 0.07);
+  border: 1px solid rgb(245 181 68 / 0.25);
+}
+.cal-type-result p {
+  margin: 0;
+  font-size: 0.92rem;
+}
+.cal-type-options {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+.cal-type-options .time {
+  min-height: 44px;
+  padding-inline: 4px;
+  font-size: 0.9rem;
+  white-space: nowrap;
+}
+.cal-or {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0;
+  color: var(--dim);
+  font-size: 0.82rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.cal-or::before,
+.cal-or::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--line);
+}
+.cal-body {
+  display: grid;
+  gap: 22px;
+}
+@container (min-width: 540px) {
+  .cal-body {
+    grid-template-columns: minmax(270px, 1.1fr) minmax(0, 1fr);
+    align-items: start;
+    gap: 28px;
+  }
+  .cal-times {
+    padding-left: 28px;
+    border-left: 1px solid var(--line);
+  }
+}
+.cal-month {
+  display: grid;
+  gap: 12px;
+}
+.cal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.cal-title {
+  margin: 0;
+  font: 800 1.15rem/1 var(--display);
+  letter-spacing: -0.01em;
+}
+.cal-nav {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: 1px solid var(--line-2);
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+}
+.cal-nav:hover:not(:disabled) {
+  border-color: var(--gold);
+}
+.cal-nav:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+.cal-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 4px;
+}
+.cal-wd {
+  padding-bottom: 6px;
+  text-align: center;
+  color: var(--dim);
+  font: 700 0.72rem/1 var(--body);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+@container (max-width: 359px) {
+  .cal-wd-rest {
+    display: none;
+  }
+  .cal-grid {
+    gap: 2px;
+  }
+  .cal-day {
+    font-size: 0.9rem;
+  }
+  .cal .time-grid,
+  .cal-type-options {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+.cal-type-row input {
+  min-width: 0;
+}
+.cal-day {
+  position: relative;
+  justify-self: center;
+  width: 100%;
+  max-width: 46px;
+  aspect-ratio: 1;
+  min-width: 0;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--dim);
+  font: 600 0.98rem/1 var(--body);
+  font-variant-numeric: tabular-nums;
+  opacity: 0.45;
+}
+.cal-day.has-slots {
+  opacity: 1;
+  color: var(--text);
+  font-weight: 800;
+  background: rgb(245 181 68 / 0.08);
+  cursor: pointer;
+  transition:
+    background-color 0.2s,
+    border-color 0.2s;
+}
+/* Small dot = "free times on this day", like a calendar event marker. */
+.cal-day.has-slots::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: 14%;
+  width: 4px;
+  height: 4px;
+  margin-left: -2px;
+  border-radius: 50%;
+  background: var(--gold);
+}
+.cal-day.has-slots:hover {
+  border-color: var(--gold);
+}
+.cal-day.is-today {
+  border-color: var(--line-2);
+}
+.cal-day.is-on {
+  background: var(--grad);
+  color: #160b02;
+  border-color: transparent;
+}
+.cal-day.is-on::after {
+  background: #160b02;
+}
+.cal-times {
+  display: grid;
+  gap: 14px;
+  align-content: start;
+}
+.cal-times-title {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+  font: 800 1.1rem/1.2 var(--display);
+}
+.cal-times-title span {
+  color: var(--muted);
+  font: 500 0.88rem/1.3 var(--body);
+}
+.cal .time-grid {
+  grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+}
+/* Booking steps never grow wider than the card (small phones). */
+.step,
+.cal,
+.cal-type,
+.cal-body,
+.cal-month,
+.cal-times {
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
+}
+@container (min-width: 540px) {
+  .cal-body {
+    grid-template-columns: minmax(270px, 1.1fr) minmax(0, 1fr);
+  }
+}
+.book-bar {
+  grid-template-columns: minmax(0, 1fr);
+}
+@media (max-width: 359px) {
+  .book-bar .btn {
+    padding-inline: 12px;
+    font-size: 0.95rem;
+    white-space: normal;
   }
 }

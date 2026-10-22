@@ -1,5 +1,5 @@
 import { cookies } from "next/headers";
-import { SESSION_COOKIE } from "@/lib/server/booking-session";
+import { endSession, SESSION_COOKIE } from "@/lib/server/booking-session";
 import { logoutCustomer } from "@/lib/server/customer-auth";
 import { assertSameOrigin, handler } from "@/lib/server/http";
 
@@ -7,6 +7,8 @@ import { assertSameOrigin, handler } from "@/lib/server/http";
 export const POST = handler(async (request: Request) => {
   assertSameOrigin(request);
   await logoutCustomer();
-  (await cookies()).delete({ name: SESSION_COOKIE, path: "/" });
+  const store = await cookies();
+  await endSession(store.get(SESSION_COOKIE)?.value);
+  store.delete({ name: SESSION_COOKIE, path: "/" });
   return new Response(null, { status: 204 });
 });

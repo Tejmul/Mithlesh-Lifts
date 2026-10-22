@@ -1,5 +1,5 @@
 import "server-only";
-// Customer accounts (account = Lead, identified by a verified phone).
+// Customer accounts (account = Lead, identified by a verified email; see docs/FLOW.md).
 // The httpOnly cookie holds only a random token; the DB stores hashToken(token) in CustomerSession.
 import { randomInt } from "crypto";
 import { cookies } from "next/headers";
@@ -9,7 +9,6 @@ import { hashToken, randomToken } from "./crypto";
 import { db, TX_OPTIONS, type Tx } from "./db";
 import { env } from "./env";
 import { ApiException } from "./http";
-import { enqueueBookingEvent, kickNotifications } from "./notifications";
 import { logEvent } from "./observability";
 
 export const CUSTOMER_COOKIE = "css_customer";
@@ -99,7 +98,7 @@ export function clientCodePrefix(fullName: string | null | undefined): string {
   return letters || "CLIENT";
 }
 
-async function freeClientCode(tx: Tx, fullName: string | null | undefined): Promise<string> {
+export async function freeClientCode(tx: Tx, fullName: string | null | undefined): Promise<string> {
   const prefix = clientCodePrefix(fullName);
   for (let attempt = 0; attempt < 30; attempt++) {
     // Four digits normally; widen only if a very common name has filled up.
@@ -111,85 +110,22 @@ async function freeClientCode(tx: Tx, fullName: string | null | undefined): Prom
   throw new Error("Could not allocate a client code");
 }
 
-/** Find-or-create the account for a verified phone; assigns clientCode (e.g. "RAHUL-4821"). */
-export async function upsertAccount(
-  tx: Tx,
-  input: {
-    phoneE164: string;
-    fullName?: string | null;
-    source?: string | null;
-    campaign?: string | null;
-    manychatSubscriberId?: string | null;
-  },
-): Promise<Lead> {
-  const now = new Date();
-  const fullName = input.fullName?.trim() || null;
-  const existing = await tx.lead.findUnique({ where: { phoneE164: input.phoneE164 } });
-
-  if (!existing) {
-    return tx.lead.create({
-      data: {
-        phoneE164: input.phoneE164,
-        phoneVerifiedAt: now,
-        fullName,
-        source: input.source ?? null,
-        campaign: input.campaign ?? null,
-        manychatSubscriberId: input.manychatSubscriberId ?? null,
-        clientCode: await freeClientCode(tx, fullName),
-      },
-    });
-  }
-
-  const nameToSet = !existing.fullName?.trim() && fullName ? fullName : null;
-  return tx.lead.update({
-    where: { id: existing.id },
-    data: {
-      phoneVerifiedAt: now,
-      ...(nameToSet ? { fullName: nameToSet } : {}),
-      // First touch wins for tracking labels.
-      ...(!existing.source && input.source ? { source: input.source } : {}),
-      ...(!existing.campaign && input.campaign ? { campaign: input.campaign } : {}),
-      ...(!existing.manychatSubscriberId && input.manychatSubscriberId
-        ? { manychatSubscriberId: input.manychatSubscriberId }
-        : {}),
-      // Accounts start nameless ("CLIENT-1234"); the first real name gives them a proper code.
-      ...(!existing.clientCode || (nameToSet && existing.clientCode.startsWith("CLIENT-") && clientCodePrefix(nameToSet) !== "CLIENT")
-        ? { clientCode: await freeClientCode(tx, existing.fullName?.trim() || fullName) }
-        : {}),
-    },
-  });
-}
-
 /**
- * Optional name + email, asked on /account after booking. A new email also gets the booking
- * confirmation + reminders for the upcoming call (they were skipped while we had no address).
+ * Name change from /account. The email is the account and is never changed here: an address can
+ * only be attached by confirming a code sent to it (docs/FLOW.md), otherwise a logged-in user could
+ * claim someone else's email and later see their bookings.
  */
-export async function updateProfile(lead: Lead, input: { fullName?: string; email?: string }): Promise<Lead> {
+export async function updateProfile(lead: Lead, input: { fullName?: string }): Promise<Lead> {
   const fullName = input.fullName?.trim() || null;
-  const email = input.email?.trim().toLowerCase() || null;
-  const emailChanged = email !== null && email !== lead.email;
+  if (!fullName || fullName === lead.fullName) return lead;
   const updated = await db.$transaction(async (tx) => {
-    let next = lead;
-    if (fullName && fullName !== lead.fullName) {
-      const renameCode = !lead.clientCode || (lead.clientCode.startsWith("CLIENT-") && clientCodePrefix(fullName) !== "CLIENT");
-      next = await tx.lead.update({
-        where: { id: lead.id },
-        data: { fullName, ...(renameCode ? { clientCode: await freeClientCode(tx, fullName) } : {}) },
-      });
-    }
-    if (emailChanged) {
-      next = await tx.lead.update({ where: { id: lead.id }, data: { email } });
-      const upcoming = await tx.booking.findFirst({
-        where: { leadId: lead.id, status: "CONFIRMED", startsAt: { gt: new Date() } },
-        orderBy: { startsAt: "asc" },
-        select: { id: true },
-      });
-      if (upcoming) await enqueueBookingEvent(tx, upcoming.id, "confirmed");
-    }
-    return next;
+    const renameCode = !lead.clientCode || (lead.clientCode.startsWith("CLIENT-") && clientCodePrefix(fullName) !== "CLIENT");
+    return tx.lead.update({
+      where: { id: lead.id },
+      data: { fullName, ...(renameCode ? { clientCode: await freeClientCode(tx, fullName) } : {}) },
+    });
   }, TX_OPTIONS);
-  if (emailChanged) kickNotifications();
-  logEvent("customer.profile_updated", { leadId: lead.id, name: Boolean(fullName), email: emailChanged });
+  logEvent("customer.profile_updated", { leadId: lead.id });
   return updated;
 }
 

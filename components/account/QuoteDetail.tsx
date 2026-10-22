@@ -70,9 +70,14 @@ export function QuoteDetail({ id }: { id: string }) {
             const res = await apiFetch<QuoteResponse>("/api/payments/razorpay/verify", { method: "POST", body: { quoteId: quote.id, ...r } });
             setQuote(res.quote);
             setStatus("idle");
-          } catch {
+          } catch (err) {
             setStatus("idle");
-            setError(`We couldn't confirm your payment yet. If money left your account, it's safe. Send us this payment ID on Instagram: ${r.razorpay_payment_id}`);
+            // 409: money received but the quote was already paid or withdrawn — the server explains.
+            setError(
+              err instanceof ApiError && err.code === "BAD_REQUEST"
+                ? err.message
+                : `We couldn't confirm your payment yet. If money left your account, it's safe. Send us this payment ID on Instagram: ${r.razorpay_payment_id}`,
+            );
           }
         },
       });

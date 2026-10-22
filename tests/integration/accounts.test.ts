@@ -20,18 +20,16 @@ import { db } from "@/lib/server/db";
 import { clearOutbox, readOutbox } from "@/lib/server/dev-outbox";
 import { ApiException } from "@/lib/server/http";
 import { listInbox, markInboxRead } from "@/lib/server/inbox";
-import { sendPhoneCode, verifyPhoneCode } from "@/lib/server/phone-verify/flow";
-import { resetMockPhoneVerify } from "@/lib/server/phone-verify/mock";
+import { sendEmailCode, verifyEmailCode } from "@/lib/server/email-verify/flow";
 import { getAvailableSlots } from "@/lib/server/scheduling/availability";
 import { resetDb, seedSchedule } from "../helpers/db";
 
-const IN = { country: "IN", phone: "98765 43210" };
+const EMAIL = "rahul@example.com";
 const IN_E164 = "+919876543210";
 const IP = "203.0.113.9";
 
 function codeFor(to: string) {
-  const body = readOutbox({ to, channel: "sms" }).at(-1)?.body;
-  const m = body?.match(/(\d{6})$/);
+  const m = readOutbox({ to, channel: "email" }).at(-1)?.subject?.match(/^(\d{6}) /);
   if (!m) throw new Error("no code");
   return m[1]!;
 }
@@ -39,17 +37,11 @@ function codeFor(to: string) {
 const fresh = (s: BookingSession) => db.bookingSession.findUniqueOrThrow({ where: { id: s.id } });
 const newSession = async () => (await startSession(undefined, {})).session;
 
-async function verifyNumber() {
+/** Name + email + phone → code by email → verified, account created, logged in. */
+async function verifyWith(fullName = "Rahul Sharma") {
   const session = await newSession();
-  await sendPhoneCode(session, IN, IP);
-  return verifyPhoneCode(await fresh(session), codeFor(IN_E164), IP);
-}
-
-/** Number + OTP, then the optional name from /account. */
-async function verifyWith(fullName?: string) {
-  const verified = await verifyNumber();
-  if (fullName) await updateProfile(await requireCustomer(), { fullName });
-  return fresh(verified);
+  await sendEmailCode(session, { fullName, email: EMAIL, country: "IN", phone: "98765 43210" }, IP);
+  return verifyEmailCode(await fresh(session), codeFor(EMAIL), IP);
 }
 
 async function expectApiError(p: Promise<unknown>, status: number, code: string) {
@@ -65,7 +57,6 @@ async function expectApiError(p: Promise<unknown>, status: number, code: string)
 beforeEach(async () => {
   await resetDb();
   clearOutbox();
-  resetMockPhoneVerify();
   jar.clear();
 });
 afterAll(async () => {
@@ -73,11 +64,12 @@ afterAll(async () => {
 });
 
 describe("number → OTP = account + login", () => {
-  it("a new number gets a nameless account and is logged in straight away", async () => {
-    const verified = await verifyNumber();
-    const lead = await db.lead.findUniqueOrThrow({ where: { phoneE164: IN_E164 } });
-    expect(lead.fullName).toBeNull();
-    expect(lead.clientCode).toMatch(/^CLIENT-\d{4}$/);
+  it("confirming the email creates the account and logs in", async () => {
+    const verified = await verifyWith();
+    const lead = await db.lead.findUniqueOrThrow({ where: { email: EMAIL } });
+    expect(lead).toMatchObject({ fullName: "Rahul Sharma", phoneE164: IN_E164 });
+    expect(lead.clientCode).toMatch(/^RAHUL-\d{4}$/);
+    expect(lead.emailVerifiedAt).not.toBeNull();
     expect(lead.lastLoginAt).not.toBeNull();
 
     const token = jar.get(CUSTOMER_COOKIE);
@@ -85,82 +77,43 @@ describe("number → OTP = account + login", () => {
     const row = await db.customerSession.findUniqueOrThrow({ where: { tokenHash: hashToken(token!) } });
     expect(row.leadId).toBe(lead.id);
     expect(row.expiresAt.getTime()).toBeGreaterThan(Date.now() + 29 * 86_400_000);
-
-    const view = await toSessionView(verified);
-    expect(view.phoneVerified).toBe(true);
-    expect(view.account).toEqual({ clientCode: lead.clientCode, fullName: null, phoneE164: IN_E164, email: null });
-    expect((await requireCustomer()).id).toBe(lead.id);
+    expect((await toSessionView(verified)).account).toEqual({
+      clientCode: lead.clientCode,
+      fullName: "Rahul Sharma",
+      phoneE164: IN_E164,
+      email: EMAIL,
+    });
   });
 
-  it("adding a name later gives a name-based client code", async () => {
-    await verifyWith("Rahul Sharma");
-    const lead = await db.lead.findUniqueOrThrow({ where: { phoneE164: IN_E164 } });
-    expect(lead.fullName).toBe("Rahul Sharma");
-    expect(lead.clientCode).toMatch(/^RAHUL-\d{4}$/);
-  });
-
-  it("client codes keep CLIENT for names without Latin letters and trim long names", async () => {
+  it("client codes fall back to CLIENT for names without Latin letters and trim long names", async () => {
     await verifyWith("राहुल");
-    expect((await db.lead.findUniqueOrThrow({ where: { phoneE164: IN_E164 } })).clientCode).toMatch(/^CLIENT-\d{4}$/);
-
+    expect((await db.lead.findUniqueOrThrow({ where: { email: EMAIL } })).clientCode).toMatch(/^CLIENT-\d{4}$/);
     await resetDb();
     clearOutbox();
     jar.clear();
     await verifyWith("Bartholomew-Alexander Smith");
-    expect((await db.lead.findUniqueOrThrow({ where: { phoneE164: IN_E164 } })).clientCode).toMatch(/^BARTHOLOME-\d{4}$/);
+    expect((await db.lead.findUniqueOrThrow({ where: { email: EMAIL } })).clientCode).toMatch(/^BARTHOLOME-\d{4}$/);
   });
 
-  it("a returning number keeps its name and client code", async () => {
-    await db.lead.create({
-      data: { phoneE164: IN_E164, fullName: "Asha Rao", clientCode: "ASHA-1234", phoneVerifiedAt: new Date(0) },
-    });
-    const verified = await verifyNumber();
-    expect((await toSessionView(verified)).account).toEqual({
-      clientCode: "ASHA-1234",
-      fullName: "Asha Rao",
-      phoneE164: IN_E164,
-      email: null,
-    });
-    expect(verified.fullName).toBe("Asha Rao");
-    const lead = await db.lead.findUniqueOrThrow({ where: { phoneE164: IN_E164 } });
-    expect(lead.phoneVerifiedAt.getTime()).toBeGreaterThan(0);
+  it("the profile endpoint changes the name only: an email can't be claimed without its code", async () => {
+    await verifyWith();
+    const me = await requireCustomer();
+    const updated = await updateProfile(me, { fullName: "Rahul S", email: "victim@example.com" } as { fullName: string });
+    expect(updated).toMatchObject({ fullName: "Rahul S", email: EMAIL });
+    expect(await db.lead.count({ where: { email: "victim@example.com" } })).toBe(0);
   });
 
-  it("saving an email sends the booking confirmation + reminders for the upcoming call", async () => {
-    await seedSchedule();
-    const session = await verifyNumber();
-    const { slots } = await getAvailableSlots();
-    // Far enough out that both reminders (24 h, 1 h) are still in the future.
-    const slot = slots.find((s) => s.start.getTime() > Date.now() + 2 * 86_400_000)!;
-    await createBookingFromSession({
-      session: await fresh(session),
-      start: slot.start,
-      customerTimeZone: "Asia/Kolkata",
-      idempotencyKey: randomUUID(),
-    });
-    expect(await db.notification.count({ where: { recipient: "asha@example.com" } })).toBe(0);
-
-    const lead = await updateProfile(await requireCustomer(), { email: "Asha@Example.com" });
-    expect(lead.email).toBe("asha@example.com");
-    const kinds = (await db.notification.findMany({ where: { recipient: "asha@example.com" } })).map((n) => n.kind).sort();
-    expect(kinds).toEqual(["booking_confirmed", "reminder", "reminder"]);
-
-    // Saving the same email again doesn't queue duplicates.
-    await updateProfile(lead, { email: "asha@example.com" });
-    expect(await db.notification.count({ where: { recipient: "asha@example.com" } })).toBe(3);
-  });
-
-  it("a logged-in customer starting /book skips the OTP", async () => {
-    await verifyWith("Rahul Sharma");
+  it("a logged-in customer starting /book skips the code", async () => {
+    await verifyWith();
     jar.delete(SESSION_COOKIE); // new device tab / expired booking session, still logged in
     const session = await createOrResumeSession({});
-    expect(session).toMatchObject({ phoneE164: IN_E164, fullName: "Rahul Sharma" });
-    expect(session.phoneVerifiedAt).not.toBeNull();
+    expect(session).toMatchObject({ email: EMAIL, phoneE164: IN_E164, fullName: "Rahul Sharma" });
+    expect(session.emailVerifiedAt).not.toBeNull();
     expect((await toSessionView(session)).account?.fullName).toBe("Rahul Sharma");
   });
 
   it("logout deletes the session row and cookie", async () => {
-    await verifyWith("Rahul Sharma");
+    await verifyWith();
     await logoutCustomer();
     expect(jar.has(CUSTOMER_COOKIE)).toBe(false);
     expect(await db.customerSession.count()).toBe(0);
@@ -171,7 +124,7 @@ describe("number → OTP = account + login", () => {
   it("expired or unknown customer cookies are ignored", async () => {
     jar.set(CUSTOMER_COOKIE, "bogus");
     expect(await getCurrentCustomer()).toBeNull();
-    await verifyWith("Rahul Sharma");
+    await verifyWith();
     await db.customerSession.updateMany({ data: { expiresAt: new Date(Date.now() - 1000) } });
     expect(await getCurrentCustomer()).toBeNull();
     expect(await db.customerSession.count()).toBe(0);
@@ -181,7 +134,7 @@ describe("number → OTP = account + login", () => {
 describe("in-app booking notifications", () => {
   it("adds inbox items when a call is booked, moved and cancelled", async () => {
     await seedSchedule();
-    const session = await verifyWith("Rahul Sharma");
+    const session = await verifyWith();
     const lead = await requireCustomer();
     const { slots } = await getAvailableSlots();
     const booking = await createBookingFromSession({

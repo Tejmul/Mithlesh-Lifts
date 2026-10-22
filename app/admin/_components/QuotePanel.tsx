@@ -1,6 +1,7 @@
 import type { Quote } from "@/generated/prisma/client";
 import { fmtDateTime } from "@/lib/server/admin/format";
 import { formatInr, latestQuote, leadDisplayName, QUOTE_STATUS_LABEL } from "@/lib/server/admin/quote-summary";
+import { db } from "@/lib/server/db";
 import { reportError } from "@/lib/server/observability";
 import { listQuotesForLead } from "@/lib/server/quotes";
 import { durationLabel } from "@/lib/server/memberships";
@@ -27,11 +28,28 @@ type Props = {
 /** Send a quote (plan + ₹ amount) to the lead and track its status. */
 export async function QuotePanel({ lead, booking, tz }: Props) {
   let quotes: Quote[] | null = null;
+  // Online payments per quote, to flag money that needs a refund (paid twice, or paid after the
+  // quote was cancelled / marked paid by UPI).
+  const paidOnline = new Map<string, { amountInr: number; providerPaymentId: string | null }[]>();
+  const paidManually = new Set<string>();
   try {
     quotes = [...(await listQuotesForLead(lead.id))].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+    const [payments, manual] = await Promise.all([
+      db.payment.findMany({
+        where: { status: "PAID", quote: { leadId: lead.id } },
+        select: { quoteId: true, amountInr: true, providerPaymentId: true },
+      }),
+      db.membership.findMany({ where: { leadId: lead.id, paidVia: "manual" }, select: { quoteId: true } }),
+    ]);
+    for (const p of payments) paidOnline.set(p.quoteId, [...(paidOnline.get(p.quoteId) ?? []), p]);
+    for (const m of manual) paidManually.add(m.quoteId);
   } catch (err) {
     reportError(err, { where: "admin.quote_panel.list" });
   }
+  const refundNeeded = (q: Quote) => {
+    const online = paidOnline.get(q.id) ?? [];
+    return (q.status !== "PAID" && online.length > 0) || online.length > 1 || (paidManually.has(q.id) && online.length > 0);
+  };
   const paid = latestQuote(quotes?.filter((q) => q.status === "PAID") ?? []);
   const showClientHint = booking && paid && !booking.convertedAt && booking.status !== "CANCELLED";
 
@@ -117,6 +135,13 @@ export async function QuotePanel({ lead, booking, tz }: Props) {
                   <span className="adm-mono">{q.reference}</span>
                 </p>
                 {q.note && <p className="adm-small adm-muted">{q.note}</p>}
+                {refundNeeded(q) && (
+                  <p className="adm-msg adm-msg-error" role="alert">
+                    Refund needed: money was received online for this quote that isn&apos;t covered by the plan (
+                    {(paidOnline.get(q.id) ?? []).map((p) => `${formatInr(p.amountInr)} ${p.providerPaymentId ?? ""}`.trim()).join(", ")}
+                    ). Refund it in the Razorpay dashboard, or activate the plan.
+                  </p>
+                )}
                 <p className="adm-small adm-muted">
                   Sent {fmtDateTime(q.createdAt, tz)}
                   {q.paidAt && (

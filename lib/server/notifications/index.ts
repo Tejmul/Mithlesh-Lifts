@@ -80,7 +80,7 @@ export async function enqueueBookingEvent(tx: Tx, bookingId: string, event: Book
 }
 
 /** Claims due rows (FOR UPDATE SKIP LOCKED), sends, retries with backoff. Safe to run concurrently. */
-export async function processDueNotifications(opts?: { limit?: number; now?: Date }): Promise<{ sent: number; failed: number; retried: number }> {
+export async function processDueNotifications(opts?: { limit?: number; now?: Date; budgetMs?: number }): Promise<{ sent: number; failed: number; retried: number }> {
   return runWorker(opts);
 }
 

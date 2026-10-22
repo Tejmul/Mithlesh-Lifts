@@ -53,6 +53,17 @@ async function claim(limit: number, now: Date): Promise<ClaimedRow[]> {
     RETURNING id, "bookingId", kind, recipient, payload, "idempotencyKey", attempts`;
 }
 
+/**
+ * Wording uses the time actually left: a 24h reminder delayed (outage, backlog) to 3h before the
+ * call says "in 3 hours", not "in 24 hours". On-time reminders keep their planned wording.
+ */
+export function reminderOffsetNow(plannedMinutes: number, startsAt: Date, now: Date = new Date()): number {
+  const left = Math.max(1, Math.round((startsAt.getTime() - now.getTime()) / 60_000));
+  if (left >= plannedMinutes - 10) return plannedMinutes;
+  if (left >= 120) return Math.round(left / 60) * 60;
+  return left >= 55 ? 60 : Math.max(5, Math.round(left / 5) * 5);
+}
+
 /** Error text stored on the row: short, and with anything that looks like an address removed. */
 function scrub(message: string) {
   return message
@@ -125,7 +136,7 @@ function renderRow(row: ClaimedRow, booking: BookingWithLead, settings: Settings
     case "booking_cancelled":
       return bookingCancelled({ ...customer(), manageUrl: null });
     case "reminder":
-      return reminder({ ...customer(), offsetMinutes: payload.offsetMinutes ?? 60 });
+      return reminder({ ...customer(), offsetMinutes: reminderOffsetNow(payload.offsetMinutes ?? 60, booking.startsAt) });
     case "team_new_booking":
       return teamNewBooking(team());
     case "team_booking_changed":
@@ -139,8 +150,9 @@ function renderRow(row: ClaimedRow, booking: BookingWithLead, settings: Settings
 }
 
 export async function processDueNotifications(
-  opts: { limit?: number; now?: Date } = {},
+  opts: { limit?: number; now?: Date; budgetMs?: number } = {},
 ): Promise<{ sent: number; failed: number; retried: number }> {
+  const startedAt = Date.now();
   const now = opts.now ?? new Date();
   const limit = Math.max(1, Math.min(opts.limit ?? 25, 200));
   const counts = { sent: 0, failed: 0, retried: 0 };
@@ -154,7 +166,16 @@ export async function processDueNotifications(
     (await db.booking.findMany({ where: { id: { in: bookingIds } }, include: { lead: true } })).map((b) => [b.id, b]),
   );
 
-  for (const row of rows) {
+  for (const [index, row] of rows.entries()) {
+    // Stop before the platform kills the function mid-send; unsent rows go back to the queue
+    // untouched (attempt not counted) for the next run.
+    if (opts.budgetMs && Date.now() - startedAt > opts.budgetMs) {
+      await db.notification.updateMany({
+        where: { id: { in: rows.slice(index).map((r) => r.id) }, status: "SENDING" },
+        data: { status: "PENDING", lockedUntil: null, attempts: { decrement: 1 } },
+      });
+      break;
+    }
     const booking = row.bookingId ? (bookings.get(row.bookingId) ?? null) : null;
     const reason = skipReason(row, booking, now);
     if (reason) {

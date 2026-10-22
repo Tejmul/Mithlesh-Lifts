@@ -1,5 +1,5 @@
 // Mithilesh Reddy × Coach Scale Systems — sales-call booking.
-// Flow (docs/FLOW.md): ManyChat link → phone + OTP → pick slot → booked + logged in → optional email
+// Flow (docs/FLOW.md): ManyChat link → name + email + phone → code by email → pick slot → booked + logged in
 // → sales call → quote (plan + ₹ + length) → paid → Membership (valid from/until) in /admin/clients.
 // All timestamps are UTC (timestamptz). Time zones are IANA names.
 
@@ -52,11 +52,13 @@ model DayOff {
 
 model Lead {
   id                   String    @id @default(cuid())
-  /// Optional: the booking flow is number → OTP → slot. The sales team fills these in after the call.
   fullName             String?
-  phoneE164            String    @unique
-  phoneVerifiedAt      DateTime  @db.Timestamptz(3)
-  email                String?
+  /// Number the sales team calls. Entered by the customer, not verified (identity is the email).
+  phoneE164            String
+  phoneVerifiedAt      DateTime? @db.Timestamptz(3)
+  /// The account: verified with a code sent by email (docs/FLOW.md).
+  email                String?   @unique
+  emailVerifiedAt      DateTime? @db.Timestamptz(3)
   source               String?
   campaign             String?
   manychatSubscriberId String?
@@ -73,7 +75,7 @@ model Lead {
   quotes      Quote[]
   memberships Membership[]
 
-  @@index([email])
+  @@index([phoneE164])
   @@index([createdAt])
 }
 
@@ -87,6 +89,13 @@ model BookingSession {
   phoneVerifiedAt      DateTime? @db.Timestamptz(3)
   fullName             String?
   email                String?
+  /// Email the code was last sent to. Verification only counts for this exact address.
+  pendingEmail         String?
+  emailVerifiedAt      DateTime? @db.Timestamptz(3)
+  /// hmac of the 6-digit code; never the code itself.
+  emailCodeHash        String?
+  emailCodeExpiresAt   DateTime? @db.Timestamptz(3)
+  emailCodeAttempts    Int       @default(0)
   marketingConsent     Boolean   @default(false)
   source               String?
   campaign             String?

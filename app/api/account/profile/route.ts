@@ -4,7 +4,7 @@ import { apiOk, assertSameOrigin, handler, parseBody } from "@/lib/server/http";
 import type { AccountResponse } from "@/lib/shared/api";
 import { profileSchema } from "@/lib/shared/validation";
 
-/** PUT /api/account/profile — optional name + email, asked after booking → AccountResponse. */
+/** PUT /api/account/profile — name change → AccountResponse. */
 export const PUT = handler(async (request: Request) => {
   assertSameOrigin(request);
   const lead = await requireCustomer();

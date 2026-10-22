@@ -28,7 +28,49 @@ export const fullNameSchema = z
   .min(2, "Enter your name.")
   .max(80, "Keep your name under 80 characters.");
 
-/** Step 1 — mobile number only. One path for new and returning people (docs/FLOW.md). */
+/** "ra•••@gmail.com" — shows where a code went without exposing the full address. */
+export function maskEmail(email: string) {
+  const [user = "", domain = ""] = email.split("@");
+  return `${user.slice(0, 2)}${"•".repeat(Math.max(1, Math.min(4, user.length - 2)))}@${domain}`;
+}
+
+/**
+ * Step 1 (docs/FLOW.md): name + email + phone, code sent by email. "Log in" sends only the email,
+ * so name and phone are optional here; mode "book" requires them.
+ */
+export const sendEmailCodeSchema = z
+  .object({
+    mode: z.enum(["book", "login"]).default("book"),
+    fullName: z.string().trim().max(80, "Keep your name under 80 characters.").optional(),
+    email: emailSchema,
+    country: z.string().length(2, "Choose your country code.").optional(),
+    phone: z.string().trim().max(20, "That number is too long.").optional(),
+  })
+  .superRefine((v, ctx) => {
+    if (v.mode === "book" && (v.fullName ?? "").length < 2) {
+      ctx.addIssue({ code: "custom", path: ["fullName"], message: "Enter your name." });
+    }
+    if (v.mode === "book" && !v.phone) {
+      ctx.addIssue({ code: "custom", path: ["phone"], message: "Enter your mobile number." });
+    } else if (v.phone && !normalizePhone(v.country ?? "IN", v.phone)) {
+      ctx.addIssue({ code: "custom", path: ["phone"], message: "Enter a valid mobile number for the selected country." });
+    }
+  });
+
+/** After a "Log in" with a new email: the details the booking needs. */
+export const detailsSchema = z
+  .object({
+    fullName: fullNameSchema,
+    country: z.string().length(2, "Choose your country code."),
+    phone: z.string().trim().min(4, "Enter your mobile number.").max(20, "That number is too long."),
+  })
+  .superRefine((v, ctx) => {
+    if (!normalizePhone(v.country, v.phone)) {
+      ctx.addIssue({ code: "custom", path: ["phone"], message: "Enter a valid mobile number for the selected country." });
+    }
+  });
+
+/** Mobile number only (kept for SMS OTP providers, e.g. MSG91, if phone codes come back). */
 export const sendCodeSchema = z
   .object({
     country: z.string().length(2, "Choose your country code."),
@@ -44,10 +86,9 @@ export const verifyCodeSchema = z.object({
   code: z.string().trim().regex(/^\d{4,8}$/, "Enter the code from the SMS."),
 });
 
-/** /account → optional name + email, asked after booking. Empty strings clear nothing. */
+/** /account → name change only (the email is the account; see updateProfile). */
 export const profileSchema = z.object({
   fullName: z.union([fullNameSchema, z.literal("").transform(() => undefined)]).optional(),
-  email: z.union([emailSchema, z.literal("").transform(() => undefined)]).optional(),
 });
 
 /** Admin → send a quote to a client. */
