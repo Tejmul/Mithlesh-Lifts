@@ -1,0 +1,4 @@
+# Never upload local settings or secrets with `vercel` deploys; production values live in Vercel.
+.env
+.env.*
+*.pem
