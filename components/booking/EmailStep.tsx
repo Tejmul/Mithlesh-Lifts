@@ -80,7 +80,7 @@ export function EmailStep({ headingRef, ...p }: Props) {
       case "RATE_LIMITED":
         return "Too many attempts. Please wait a few minutes and try again.";
       case "OTP_SEND_FAILED":
-        return "We couldn't send the code. Check the email address and try again.";
+        return "We couldn't send the code right now. Please check the email address, or try again in a few minutes.";
       case "OTP_INVALID":
         return "That code is wrong or has expired. Check your email, or send a new code.";
       default:

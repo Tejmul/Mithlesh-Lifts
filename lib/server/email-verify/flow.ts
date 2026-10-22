@@ -119,7 +119,7 @@ export async function sendEmailCode(
   if (!sent.ok) {
     await releaseCooldown(session.id);
     reportError(new Error(sent.error), { where: "email-code-send", sessionId: session.id });
-    throw new ApiException(502, "OTP_SEND_FAILED", "We couldn't send the code. Check the email address and try again.");
+    throw new ApiException(502, "OTP_SEND_FAILED", "We couldn't send the code right now. Please try again in a few minutes.");
   }
   logEvent("email_code_sent", { sessionId: session.id, provider: env().EMAIL_PROVIDER });
   return { sentTo: maskEmail(email), resendAvailableAt: new Date(Date.now() + cooldown * 1000).toISOString() };
