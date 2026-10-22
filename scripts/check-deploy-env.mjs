@@ -6,7 +6,7 @@ else if (/localhost|127\.0\.0\.1/.test(url)) problems.push("DATABASE_URL points 
 if (url && /aivencloud\.com/.test(url) && !process.env.DATABASE_CA_CERT) problems.push("DATABASE_CA_CERT is missing (Aiven's CA certificate).");
 if (problems.length) {
   console.error("\nDeploy settings need fixing:\n- " + problems.join("\n- "));
-  console.error("\nFix: Vercel → Settings → Environment Variables → import mithlesh/.env.vercel (not .env), then redeploy.\n");
+  console.error("\nFix: Vercel → Settings → Environment Variables → paste the values from mithlesh/.env, then redeploy.\n");
   process.exit(1);
 }
 console.log("Deploy settings look right.");

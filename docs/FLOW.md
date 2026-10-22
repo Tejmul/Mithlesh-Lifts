@@ -125,7 +125,7 @@ Instagram DM ─► ManyChat asks its questions ─► sends link  /book?source=
 
 ## Before going live (checked 2026-10-23 audit)
 - Resend: verify the sending domain; set `EMAIL_FROM` on it. Until then codes only reach the Resend owner.
-- Vercel env: import `.env.vercel` (local file, not in git); set the real `APP_URL`. The site refuses to
+- Vercel env: paste everything from `mithlesh/.env` (not in git; it holds the production values); set the real `APP_URL`. The site refuses to
   start with a placeholder `APP_URL`, a missing `RESEND_API_KEY` or an `@example.com` sender.
 - Vercel runs `vercel-build` = `prisma generate && prisma migrate deploy && next build`, so database
   changes apply on deploy.
